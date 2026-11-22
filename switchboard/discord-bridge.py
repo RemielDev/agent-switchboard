@@ -3934,8 +3934,13 @@ class Bridge:
         now = time.time()
         if now - self.last_tick < 2: return
         self.last_tick = now; self.open_cache = None
-        for e in fleet.events(self.st["ev_ts"]):
-            self.st["ev_ts"] = max(self.st["ev_ts"], e["ts"])
+        # Two events can carry the same timestamp (a coarse clock, as on Windows, or two writers): read from the cursor
+        # inclusively and remember which events at exactly that time were handled, so neither hides the other.
+        for e in fleet.events(self.st["ev_ts"], inclusive=True):
+            if e["ts"] == self.st["ev_ts"]:
+                if e.get("id") in self.st.setdefault("ev_seen", []): continue
+            else: self.st["ev_ts"] = e["ts"]; self.st["ev_seen"] = []
+            self.st.setdefault("ev_seen", []).append(e.get("id"))
             try: self.on_event(e)
             except Exception as x: log("ERR event", x)
         for m in json.loads(mail("inbox", "owner", "--json", check=False) or "[]"):

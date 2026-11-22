@@ -429,7 +429,8 @@ def event(kind, title, detail="", agent="", thread="", repo="", ref="", **more):
     with p.open("a", encoding="utf-8") as f: f.write(json.dumps(e, ensure_ascii=False) + "\n")
     return e
 
-def events(since=0.0):
+def events(since=0.0, inclusive=False):
+    """Progress events newer than SINCE, oldest first; INCLUSIVE also returns those stamped exactly SINCE."""
     out, d = [], queue_root() / "events"
     for p in sorted(d.glob("*.jsonl")) if d.is_dir() else []:
         try: lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -437,7 +438,7 @@ def events(since=0.0):
         for l in lines:
             try: e = json.loads(l)
             except ValueError: continue
-            if e.get("ts", 0) > since: out.append(e)
+            if e.get("ts", 0) > since or (inclusive and e.get("ts", 0) == since): out.append(e)
     return sorted(out, key=lambda e: e["ts"])
 
 AREA_RE = re.compile(r"(?mi)^AREA:\s*([\w.-]+)\s*$")
