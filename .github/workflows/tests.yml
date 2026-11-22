@@ -1,0 +1,32 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: No secrets or machine-specific details
+        run: python tools/check-clean.py
+      - name: Unit tests
+        run: |
+          python -m pip install pytest
+          python -m pytest tests -q
+      - name: Routing rules
+        run: python switchboard/route-test.py
+      - name: Concurrency rules
+        run: python -X utf8 switchboard/concurrency-test.py
+      - name: Discord bridge against a fake Discord
+        run: python -X utf8 switchboard/discord-bridge-test.py

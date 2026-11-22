@@ -1,0 +1,6 @@
+{
+  "max_concurrent": 4,
+  "locks": "all",
+  "turn_runs": 4,
+  "routing": {"enabled": true, "codex_builds": false}
+}

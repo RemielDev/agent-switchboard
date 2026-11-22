@@ -1,0 +1,23 @@
+// Example Syncthing ignore patterns for the shared root. Copy to <root>/.stignore on every device and adjust.
+// The idea: sync the Queue, your docs and the things agents hand each other; keep heavy, generated and
+// machine-specific content local. Source code is better moved with git than with file sync.
+(?d).DS_Store
+(?d)Thumbs.db
+(?d)desktop.ini
+(?d).*.tmp
+.git
+.venv
+node_modules
+__pycache__
+*.pyc
+// build output and caches
+dist
+build
+.next
+target
+// per-device settings that hold absolute paths
+.claude/settings.local.json
+.claude/worktrees
+.mcp.json
+// logs
+*.log

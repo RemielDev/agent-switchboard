@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS: starts the mail runner at login and keeps it alive.
+     setup/autostart.py fills in the {{...}} values and loads it; or do it by hand and run
+     launchctl load ~/Library/LaunchAgents/com.switchboard.mail-runner.plist -->
+<plist version="1.0"><dict>
+<key>Label</key><string>com.switchboard.mail-runner</string>
+<key>ProgramArguments</key><array>
+  <string>{{PYTHON}}</string><string>-u</string>
+  <string>{{SWITCHBOARD}}/mail-runner.py</string>
+  <string>--poll</string><string>10</string>
+  <string>--permission-mode</string><string>{{PERMISSION_MODE}}</string>
+  <string>--mcp</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+  <key>PATH</key><string>{{PATH}}</string>
+  <key>SWITCHBOARD_ROOT</key><string>{{ROOT}}</string>
+</dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>
+<key>StandardOutPath</key><string>{{HOME}}/Library/Logs/switchboard-mail-runner.log</string>
+<key>StandardErrorPath</key><string>{{HOME}}/Library/Logs/switchboard-mail-runner.log</string>
+</dict></plist>

@@ -1,0 +1,9 @@
+{
+  "owner": {"host": "any", "kind": "human", "auto": false, "cwd": null, "description": "The owner. Mail here is posted to Discord."},
+  "sessions": {"host": "any", "kind": "human", "auto": false, "cwd": null, "description": "Interactive session hooks. Sends the owner permission requests; not a mailbox to write to."},
+  "orchestrator": {"host": ["Desk-PC", "Laptop-Mac"], "kind": "claude", "auto": true, "cwd": null, "description": "Takes the owner's instructions, delegates, reports back."},
+  "builder": {"host": ["Desk-PC", "Laptop-Mac"], "kind": "claude", "auto": true, "cwd": null, "description": "Builds one task per message."},
+  "reviewer": {"host": ["Desk-PC", "Laptop-Mac"], "kind": "claude", "auto": true, "cwd": null, "description": "Reviews work it did not write. Read-only."},
+  "desk-pc": {"host": "Desk-PC", "kind": "claude", "auto": false, "cwd": null, "description": "Interactive sessions on Desk-PC."},
+  "laptop-mac": {"host": "Laptop-Mac", "kind": "claude", "auto": false, "cwd": null, "description": "Interactive sessions on Laptop-Mac."}
+}

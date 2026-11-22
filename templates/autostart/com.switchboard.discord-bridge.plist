@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS: starts the Discord bridge at login and keeps it alive. With two devices, the second one stays on
+     standby and serves only when the first stops renewing its lease. -->
+<plist version="1.0"><dict>
+<key>Label</key><string>com.switchboard.discord-bridge</string>
+<key>ProgramArguments</key><array>
+  <string>{{PYTHON}}</string><string>-u</string>
+  <string>{{SWITCHBOARD}}/discord-bridge.py</string>
+  <string>run</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+  <key>PATH</key><string>{{PATH}}</string>
+  <key>SWITCHBOARD_ROOT</key><string>{{ROOT}}</string>
+</dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>
+<key>StandardOutPath</key><string>{{HOME}}/Library/Logs/switchboard-discord-bridge.log</string>
+<key>StandardErrorPath</key><string>{{HOME}}/Library/Logs/switchboard-discord-bridge.log</string>
+</dict></plist>

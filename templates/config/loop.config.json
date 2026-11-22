@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "interval_hours": 8,
+  "hosts": [],
+  "repos": {},
+  "projects": {},
+  "auto_add": true,
+  "min_sessions": 5,
+  "daily_budget": 75
+}

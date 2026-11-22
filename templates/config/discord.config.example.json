@@ -1,0 +1,20 @@
+{
+  "guild_id": "written by setup",
+  "owner_id": "written by setup",
+  "bot_id": "written by setup",
+  "channels": {"orchestrator": "written by setup", "overview": "...", "progress": "...", "threads": "...", "loops": "...", "alerts": "...", "reports": "..."},
+  "lease_msg": ["written by setup", "..."],
+  "hosts": ["Desk-PC", "Laptop-Mac"],
+  "one_answer_per_turn": true,
+  "notepad": true,
+  "quick_status": true,
+  "progress_boards": true,
+  "calm_names": true,
+  "thread_state_names": false,
+  "add_owner_to_threads": false,
+  "screenshots": false,
+  "triage": false,
+  "janitor": false,
+  "argon_chat": false,
+  "receipt": false
+}

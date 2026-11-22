@@ -1,0 +1,10 @@
+{
+  "_about": "Settings for housekeeper.py's optional memory judge on a Windows worker (needs the agy CLI). There are no keep or close lists: a model decides from the unfinished mail threads. `notes` are context it weighs, not rules. Re-read every pass.",
+  "judge_every_min": 10,
+  "pressure_free_gb": 6,
+  "models": ["gemini-4-carbon-low", "gemini-4-carbon-medium"],
+  "notes": [
+    "A Chrome tab group holds the tabs of one piece of agent work, named after it.",
+    "The Discord desktop app is not used by the agents; the bridge talks to Discord through its bot."
+  ]
+}
