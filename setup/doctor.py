@@ -124,7 +124,10 @@ def check(fix, root_arg, name_arg):
     except (OSError, ValueError): cfg = {}
     if token.is_file() and token.read_text(encoding="utf-8").strip(): r.ok("discord token", str(token))
     else:
-        if fix: token.parent.mkdir(parents=True, exist_ok=True)  # so the owner only has to save one file
+        if fix:  # so the owner only has to save one file; private to this user
+            token.parent.mkdir(parents=True, exist_ok=True)
+            try: os.chmod(token.parent, 0o700)
+            except OSError: pass
         r.todo("discord token", f"OWNER STEP: create a bot (docs/discord-setup.md, about ten minutes) and save its token, as one line, in {token}")
     if cfg.get("guild_id") and cfg.get("channels"): r.ok("discord server", f"configured, {len(cfg['channels'])} channels")
     else: r.todo("discord server", "not set up; needs the token first, then the server id from the owner", cmd("switchboard/discord-bridge.py", "setup", "--guild", "<your server id>"))
@@ -135,12 +138,20 @@ def check(fix, root_arg, name_arg):
     flat = settings.replace("\\\\", "\\")  # JSON doubles the backslashes of a Windows path
     if any(h in flat for h in here): r.ok("session hooks", "installed in ~/.claude/settings.json, from this checkout")
     elif "session-hook.py" in settings:
-        r.note("session hooks", "installed from ANOTHER checkout, not this one; running the installer would point them here, so ask the owner first",
+        r.note("session hooks", "a session-hook.py from somewhere else is ALREADY installed (another copy of this project, or other tooling): leave it unless the owner says to replace it; the dry run shows what would change",
                cmd("switchboard/install-session-hooks.py", "--dry-run"))
-    else: r.todo("session hooks", "optional: shows your own sessions in Discord and forwards permission requests when you are away; see what it changes first",
+    else: r.note("session hooks", "optional, ask first: shows your own sessions in Discord and forwards permission requests when you are away; see what it changes",
                  cmd("switchboard/install-session-hooks.py", "--dry-run"))
-    r.note("mail tools for your own sessions", "optional: lets an interactive Claude Code session send and read agent mail",
-           f"claude mcp add --scope user agent_mail -- {sys.executable} {SWITCHBOARD / 'agent-mail-mcp.py'} --agent {mine}")
+    try: have = (json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8")).get("mcpServers") or {}).get("agent_mail")
+    except (OSError, ValueError, AttributeError): have = None
+    ours = have and str(SWITCHBOARD / "agent-mail-mcp.py") in " ".join(map(str, have.get("args") or []))
+    if ours: r.ok("mail tools for your own sessions", "the agent_mail MCP server is registered from this checkout")
+    elif have:
+        r.note("mail tools for your own sessions", "an MCP server named agent_mail is ALREADY registered and points somewhere else ("
+               + " ".join(map(str, (have.get("args") or [])[:1]))[:120] + "): leave it alone unless the owner says to replace it")
+    else:
+        r.note("mail tools for your own sessions", "optional, ask first: lets an interactive Claude Code session send and read agent mail",
+               f"claude mcp add --scope user agent_mail -- {sys.executable} {SWITCHBOARD / 'agent-mail-mcp.py'} --agent {mine}")
     r.note("start at login", "optional, ask the owner first", cmd("setup/autostart.py", "show"))
 
     try:
@@ -161,7 +172,7 @@ def main():
     else:
         for x in r.rows:
             print(f"{x['status']:5} {x['check']:34} {x['detail']}" + (f"\n      -> {x['command']}" if x["command"] and x["status"] != "OK" else ""))
-        print("\nCore ready: mail, agents and the runner. TODO lines are optional extras (Discord, hooks)." if not need else f"\nNot ready: run `{cmd('setup/doctor.py', '--fix')}`, then handle the TODO lines." if any(x["status"] == "FIX" for x in need) else "\nNot ready: handle the TODO lines above.")
+        print("\nCore ready: mail, agents and the runner. TODO lines need the owner or a yes from them; NOTE lines are optional extras." if not need else f"\nNot ready: run `{cmd('setup/doctor.py', '--fix')}`, then handle the TODO lines." if any(x["status"] == "FIX" for x in need) else "\nNot ready: handle the TODO lines above.")
     return 0 if not need else 1
 
 if __name__ == "__main__": sys.exit(main())

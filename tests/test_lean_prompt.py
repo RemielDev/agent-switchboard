@@ -35,7 +35,8 @@ USER = {"env": {"A": "1"}, "autoMode": {"allow": ["python is safe"]}, "skipAutoP
                   "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python claude-memory-loader.py"}]}, {"hooks": [{"type": "command", "command": "python session-hook.py"}]}],
                   "PreToolUse": [{"matcher": "Read|Edit", "hooks": [{"type": "command", "command": "python claude-memory-loader.py"}]},
                                  {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "python ~/.switchboard/tools/source-guard-shim.py"}]}],
-                  "PermissionRequest": [{"hooks": [{"type": "command", "command": "python switchboard/permission-hook.py"}]}],
+                  "PermissionRequest": [{"hooks": [{"type": "command", "command": f"python {mr.HERE / 'permission-hook.py'}"}]},
+                                        {"hooks": [{"type": "command", "command": "python /some/other/tool/permission-hook.py"}]}],
                   "Stop": [{"hooks": [{"type": "command", "command": "python session-hook.py"}]}]}}
 
 def launch(env, monkeypatch, user, agent="builder", folder="Kepler", pony="lite", **kw):
@@ -51,13 +52,14 @@ def launch(env, monkeypatch, user, agent="builder", folder="Kepler", pony="lite"
     mr.run_claude("/x/claude", "hi", "auto", env.root / folder, 5, agent, False, True, parent="m1", ponytail=pony, **kw)
     return seen["cmd"]
 
-def test_agent_runs_skip_user_settings_and_keep_only_two_hooks(env, monkeypatch):
+def test_agent_runs_skip_user_settings_and_keep_only_this_checkouts_permission_hook(env, monkeypatch):
     cmd = launch(env, monkeypatch, USER)
     assert cmd[cmd.index("--setting-sources") + 1] == "project,local" and cmd.count("--settings") == 1
     s = json.loads(cmd[cmd.index("--settings") + 1])
     assert s["env"] == {"A": "1"} and s["autoMode"] == USER["autoMode"] and s["skipAutoPermissionPrompt"] is True and s["permissions"] == USER["permissions"]
     assert "outputStyle" not in s and "effortLevel" not in s and s["autoMemoryEnabled"] is False
-    assert set(s["hooks"]) == {"PermissionRequest", "PreToolUse"} and "source-guard-shim.py" in json.dumps(s["hooks"]["PreToolUse"])
+    assert set(s["hooks"]) == {"PermissionRequest"} and len(s["hooks"]["PermissionRequest"]) == 1, "only the permission hook, and only this checkout's"
+    assert "/some/other/tool/" not in json.dumps(s) and "source-guard" not in json.dumps(s), "a same-named hook another tool installed is not run"
     assert "memory-loader" not in json.dumps(s) and "session-hook" not in json.dumps(s), "no memory or session hooks"
     assert s["enabledPlugins"] == {"ponytail@ponytail": True, "lint-pack@x": False, "other@x": False}, "all off but the runner's opt-ins"
     assert "--session-id" in cmd and "--resume" not in cmd

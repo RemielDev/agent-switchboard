@@ -570,13 +570,18 @@ class LiveTail(threading.Thread):
 
 SESSIONS = {}  # message id -> (session id, cwd) of its latest Claude run, for the stats row and the end event
 KEEP_SETTINGS = ("env", "autoMode", "skipAutoPermissionPrompt", "permissions", "autoMemoryEnabled")
-KEEP_HOOKS = (("PermissionRequest", "permission-hook"), ("PreToolUse", "source-guard"))
+KEEP_HOOKS = (("PermissionRequest", "permission-hook.py"),)  # (event, a script of this checkout): the only user hooks an agent run keeps
+
+def own_hook(command, script):
+    """True when a hook command runs SCRIPT from this checkout, not a file of the same name that some other tool installed."""
+    flat = str(command or "").replace("\\\\", "/").replace("\\", "/").lower()
+    return (HERE / script).as_posix().lower() in flat
 
 def agent_settings(pony="off"):
     """The one --settings JSON of an agent run, which also gets --setting-sources project,local, so the user settings
     file and its memory-loader and session hooks are not loaded (measured: 27K chars of hooks and a 15.6K user
     CLAUDE.md in a run that saved one note). Built from the device's own ~/.claude/settings.json, read each
-    run: KEEP_SETTINGS and only the permission and source-guard hooks; every plugin off but the runner's opt-ins.
+    run: KEEP_SETTINGS and only this checkout's permission hook; every plugin off but the runner's opt-ins.
     None when the file cannot be read: the run then keeps the user settings, as before."""
     try: user = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))
     except (OSError, ValueError): return None
@@ -584,7 +589,7 @@ def agent_settings(pony="off"):
     out, hooks = {k: user[k] for k in KEEP_SETTINGS if k in user}, {}
     for event, name in KEEP_HOOKS:
         for m in (user.get("hooks") or {}).get(event) or []:
-            hs = [h for h in (m.get("hooks") or []) if isinstance(h, dict) and name in str(h.get("command") or "")] if isinstance(m, dict) else []
+            hs = [h for h in (m.get("hooks") or []) if isinstance(h, dict) and own_hook(h.get("command"), name)] if isinstance(m, dict) else []
             if hs: hooks.setdefault(event, []).append({**m, "hooks": hs})
     if hooks: out["hooks"] = hooks
     plugins = {k: False for k in (user.get("enabledPlugins") or {})}
@@ -1502,7 +1507,7 @@ class Runner:
         except BaseException:
             self.drop(held, shared); raise
         say(f"start {mid} for {agent} from {msg.get('from')} \"{msg.get('subject')}\" cwd={cwd} "
-            f"mode={a.permission_mode} timeout={a.timeout_minutes:g}m run {hour + 1}/{a.max_per_hour} this hour prompt={len(prompt)}" + (f" resume={resume[:8]}" if resume else ""))
+            f"mode={a.permission_mode} timeout={a.timeout_minutes:g}m run {hour + 1}{f'/{a.max_per_hour}' if a.max_per_hour else ''} this hour prompt={len(prompt)}" + (f" resume={resume[:8]}" if resume else ""))
         return {"relay": not direct, "agent": agent, "msg": msg, "exe": exe, "cwd": cwd, "prompt": prompt, "via_stdin": via_stdin, "timeout_s": timeout_s, "held": held, "shared": shared,
                 "resume": resume, "info": info, "agents": agents, "work": WORK.pop(mid, []), "stale": timeout_s + 300}
 
@@ -1538,7 +1543,7 @@ class Runner:
             elif rt.get("engine") == "codex" and (rt.get("alt") or {}).get("engine") == "claude": rt = job["route"] = {**rt, **rt["alt"], "why": rt["why"] + "; Codex is not available here", "alt": None}
             pony, pwhy = rt.get("ponytail") or "off", rt.get("ponytail_why") or "routing is off"
             if rt.get("ponytail_ask") and "claude" in engines: pony, pwhy = ask_ponytail(exe, *rt["ponytail_text"], pony)
-            say(f"ponytail for {mid} ({agent}): {pony} ({pwhy})")
+            if pony != "off": say(f"ponytail plugin for {mid} ({agent}): {pony} ({pwhy})")
             pony_line = f"\n\nUse the ponytail skill at level {pony} for this work." if pony != "off" else ""
             def setting(engine):  # the model and effort this engine runs with: the first choice, or the stand-in for the other family
                 if rt.get("engine") == engine: return rt
@@ -1961,7 +1966,9 @@ def main():
             if a.once and not a.dry_run:
                 mine = [n for n, i in r.mail.load_agents().items() if i.get("auto") and i.get("kind") == "claude"]
                 if not any(r.mail.list_inbox(n) for n in mine):
-                    say("nothing to do: no mail is waiting for an automatic agent" + (f" ({', '.join(sorted(mine))})" if mine else "; none is registered, run setup/doctor.py --fix"))
+                    others = sorted(n for n, i in r.mail.load_agents().items() if n not in mine and i.get("kind") != "human" and r.mail.list_inbox(n))
+                    say("nothing to do: no mail is waiting for an automatic agent" + (f" ({', '.join(sorted(mine))})" if mine else "; none is registered, run setup/doctor.py --fix")
+                        + (f". Mail is waiting for {', '.join(others)}, which no runner answers (not automatic): send to an automatic agent instead" if others else ""))
             r.one_pass()
         except KeyboardInterrupt:
             say("interrupted"); r.shutdown(); return 130

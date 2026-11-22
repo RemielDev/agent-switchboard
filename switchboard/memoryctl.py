@@ -227,7 +227,10 @@ def init(root, notes, registry):
     (backup / 'routes.json').write_text(json.dumps({'root':str(root),'notes':str(notes)}))
     if not canonical.exists():
         atomic(canonical, '---\ntags: [memory/rules]\n---\n\n# ' + root.name + '\n\nApply the vault-root MEMORY.md and applicable parent rules. Keep verified facts and durable decisions in this folder. Update existing notes; keep task logs and deliverables in the project workspace.\n')
-    if not discovery.is_symlink(): discovery.symlink_to(canonical)
+    if not discovery.is_symlink():
+        try: discovery.symlink_to(canonical)
+        except OSError as error:  # Windows without Developer Mode cannot make links; the registry route above is enough for the loader
+            print('MEMORY.md link not created in ' + str(root) + ' (' + type(error).__name__ + '); the registry routes this folder instead')
     data['autoMemoryDirectory'] = str(notes)
     body = json.dumps(data, indent=2) + '\n'
     if existing != body.encode(): atomic(settings, body, existing)
@@ -246,6 +249,9 @@ def main():
     create.add_argument('root',type=Path)
     create.add_argument('--memory-dir',type=Path,help='Vault-relative folder, or absolute folder inside the vault')
     args = parser.parse_args()
+    if not Path(args.registry).is_file():
+        print('No memory registry at ' + str(args.registry) + ' yet. Create it with: setup/install-memory.py --vault <folder> (see docs/memory-and-skills.md)', file=sys.stderr)
+        return 0 if args.command == 'lint' else 1
     try:
         if args.command == 'check': return check(args.registry)
         if args.command == 'lint':

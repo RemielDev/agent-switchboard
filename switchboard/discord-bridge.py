@@ -518,7 +518,7 @@ def clock(s): s = int(max(0, s)); return f"{s // 60}:{s % 60:02d}"
 class Bridge:
     def __init__(self):
         self.cfg = load("config.json", None) or sys.exit(f"This root has no Discord setup yet ({dpath('config.json')} is missing). Run first:\n  "
-                                                         f"{Path(sys.executable).name} {Path(__file__).name} setup --guild <your server id>\ndocs/discord-setup.md explains where the id comes from.")
+                                                         f"{Path(sys.executable).name} {Path(__file__).resolve()} setup --guild <your server id>\ndocs/discord-setup.md explains where the id comes from.")
         self.st = self.load_state(); self.state_saved = fleet.saved_at(fleet.host_path(dpath("state.json"), hostname()))  # named in each lease renewal, see peer_synced
         self.ch, self.owner = self.cfg["channels"], self.cfg["owner_id"]
         self.dirty, self.last_sweep, self.last_tick, self.last_q, self.saved = set(), 0.0, 0.0, 0.0, ""
@@ -4336,8 +4336,10 @@ def main():
     if a.cmd == "setup":
         try: setup(a.guild)
         except DiscordError as e:
-            sys.exit(f"Discord refused: {str(e)[:200]}\nCheck that --guild is your server's id, that the bot was invited to that server with the link in "
-                     "docs/discord-setup.md, and that the token in the token file is the bot's current one.")
+            why = (f"The bot token was refused. Have the owner press Reset Token on the bot's page and save the new one in {TOKEN}." if e.status == 401 else
+                   "The server id is wrong or the bot is not in that server: check --guild, and that the owner invited the bot with the link in docs/discord-setup.md."
+                   if e.status in (403, 404) else "See docs/discord-setup.md.")
+            sys.exit(f"Discord refused setup ({e.status}). {why}\n{str(e)[:200]}")
         print("registered the owner mailbox" if register_owner() else "owner mailbox already registered")
         return print("created the bridge lock" if ensure_lock() else "bridge lock already set up")
     if a.cmd == "refresh": save(f"refresh.{hostname()}.json", {"at": time.time()}); return print("asked the running bridge to refresh every open thread")

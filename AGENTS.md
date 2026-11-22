@@ -75,7 +75,8 @@ python3 setup/doctor.py --fix    # then let it fix what it can
 `--fix` creates `<root>/Queue/`, installs the role files (`templates/roles` to `Queue/mail/roles`), writes default
 config files, and registers the mail agents: `owner` (the human), `orchestrator`, `builder`, `reviewer` (run
 automatically on this device), `sessions` (used by the hooks) and one named after this device for the owner's own
-interactive sessions. It never overwrites a file that exists. Lines marked TODO are the steps below.
+interactive sessions. It never overwrites a file that exists. Lines marked TODO need the owner (or their yes) and are covered by the steps
+below; NOTE lines are optional extras.
 
 ## Step 4. Prove the core works, without Discord
 
@@ -93,7 +94,7 @@ python3 switchboard/agent-mail.py read <device-agent> <id from the inbox line>
 What each one prints when it works:
 
 1. `send` prints the new message's id, for example `20270105T101500Z-3fa9c2d1`.
-2. The runner prints a `start ...` line and, 10 seconds to 2 minutes later, `done ... replied to <device-agent>`
+2. The runner prints a `start ...` line and, a few seconds to 2 minutes later, `done ... replied to <device-agent>`
    (in its first line, `caps=0/h 0/day` means no run caps are set). It
    starts one real headless Claude Code run, so it uses a little of the owner's Claude usage (a few cents at API
    prices). If it prints `nothing to do`, the message did not reach an automatic agent: check the `--to` name.
@@ -141,14 +142,17 @@ file to a backup. With the hooks, the owner's own interactive sessions appear in
 that arrives while they are away from the keyboard is forwarded to them with Allow once and Deny buttons. `--remove`
 undoes it.
 
-If the doctor says the hooks are "installed from ANOTHER checkout", this machine already has a copy of this project
-somewhere else. Installing would point the hooks at this checkout instead; the dry run lists each one with what it
-replaces. Ask the owner which checkout should own them before you change anything.
+If the doctor says a `session-hook.py` from somewhere else is already installed, this machine has another copy of
+this project or other tooling that uses the same hook names. Installing would point those hooks at this checkout
+instead; the dry run lists each one with what it replaces. Leave them alone unless the owner says to replace them.
+Runner turns only ever use the permission hook that belongs to this checkout.
 
 ## Step 7. Mail tools inside the owner's own sessions (optional)
 
 The doctor prints the exact command on its line "mail tools for your own sessions": a `claude mcp add ...` with this
 machine's Python and the full path to `agent-mail-mcp.py`. Use that line as printed (it is correct on Windows too).
+If the doctor instead says a server named `agent_mail` is already registered and points somewhere else, the owner
+has other tooling using that name: leave it alone and tell them.
 It registers an MCP server in the owner's Claude Code user settings, so ask first. After that an interactive Claude
 Code session can list agents, send work to the orchestrator and read replies.
 
