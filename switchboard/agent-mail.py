@@ -28,7 +28,7 @@ import argparse, json, os, re, secrets, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import dev_root, queue_root
+from common import dev_root, queue_root, repo_dir
 
 KINDS = ("claude", "codex", "cursor", "human")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -165,7 +165,7 @@ def send(sender, to, subject, body, repo=None, reply_to=None, needs_reply=False,
     if repo:
         if repo in (".", "..") or Path(repo).name != repo or "/" in repo or "\\" in repo:
             raise MailError(f"bad repo {repo!r}: give a folder name under the dev root, not a path")
-        if check_repo and not (dev_root() / repo).is_dir():
+        if check_repo and not repo_dir(repo).is_dir():
             raise MailError(f"unknown repo folder {repo!r} under {dev_root()}")
     human, running = agents.get(sender, {}).get("kind") == "human", os.environ.get("AGENT_MAIL_PARENT")
     thread, hops, from_thread = None, 0, None

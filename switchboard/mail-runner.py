@@ -36,7 +36,7 @@ import argparse, importlib.util, json, os, shutil, signal, subprocess, sys, temp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import hostname, dev_root, queue_root
+from common import hostname, dev_root, queue_root, repo_dir
 import fleet, screencap
 
 HERE = Path(__file__).resolve().parent
@@ -1011,7 +1011,7 @@ def build_prompt(mail, agent, info, msg, agents, me, cwd=None):
     sender = msg.get("from", "?")
     sinfo = agents.get(sender, {})
     tid = msg.get("thread") or msg.get("id")
-    cwd = cwd or (dev_root() / str(msg["repo"]) if msg.get("repo") else dev_root())
+    cwd = cwd or (repo_dir(msg["repo"]) if msg.get("repo") else dev_root())
     lines = [f"You are the mail agent \"{agent}\" on {me}" + (f" ({info['description']})" if info.get("description") else "")
              + f". You are running unattended to handle one message from {'the owner (a person)' if sinfo.get('kind') == 'human' else 'another agent'}; nobody can answer questions "
              "during this run. Never publish, release or deploy unless your role or the project's own rules say to, and never start Codex or Cursor yourself.", ""]
@@ -1426,7 +1426,7 @@ class Runner:
         self.noted.discard("cap")
         if not a.dry_run and claude_blocked(self.claude_mark) and not self.engines(agent):
             return self.park(agent, msg)  # Claude's limit is reached and Codex cannot take it: wait in the inbox, start nothing
-        if msg.get("repo"): cwd = self.root / str(msg["repo"])
+        if msg.get("repo"): cwd = repo_dir(msg["repo"], self.root)
         elif info.get("cwd"):
             cwd = Path(str(info["cwd"])).expanduser()
             if not cwd.is_absolute(): cwd = self.root / cwd

@@ -17,6 +17,14 @@ def dev_root():
     except OSError: pass
     return Path(__file__).resolve().parents[2]
 
+def repo_dir(name, root=None):
+    """The folder of repo NAME under the root. Names match without regard to case, so a repo written as "kepler" finds
+    the folder "Kepler" on a case-sensitive file system as it does on macOS and Windows."""
+    root = Path(root) if root else dev_root(); p = root / str(name)
+    if p.is_dir(): return p
+    try: return next((d for d in root.iterdir() if d.is_dir() and d.name.lower() == str(name).lower()), p)
+    except OSError: return p
+
 def toolkit_names():
     """Folder names under the root that are never a repo: the shared Queue and this checkout itself."""
     return {"Queue", Path(__file__).resolve().parents[1].name}
