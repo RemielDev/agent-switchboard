@@ -74,7 +74,9 @@ def claude_settings(python, remove, dry):
                     if not g["hooks"]: continue
                 kept.append(g)
             if not remove: kept.append({"hooks": [want]})
-            if mine or not remove: out.append(f"{ev}: {'removed' if remove else 'updated' if mine else 'added'} {script}")
+            if mine or not remove:
+                was = "; ".join(str(h.get("command", ""))[:140] for h in mine)
+                out.append(f"{ev}: " + ("removed " + script if remove else f"{script} now points at this checkout (was: {was})" if mine else "added " + script))
             if kept: hooks[ev] = kept
             else: hooks.pop(ev, None)
     if not hooks: data.pop("hooks", None)
@@ -140,6 +142,7 @@ def main():
     if not a.remove:
         try: lines += mail_agent(a.dry_run)
         except Exception as e: lines.append(f"mail agent sessions: not registered ({type(e).__name__}: {e}); the hook registers it on first use")
+    if a.dry_run: print("Dry run: nothing was written. Without --dry-run these changes would be made:")
     print("\n".join(lines))
     if not a.dry_run and not a.remove: print("New Claude Code sessions use the hooks; restart running ones.")
     return 0

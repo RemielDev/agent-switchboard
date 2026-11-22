@@ -417,6 +417,7 @@ def main(argv=None):
             elif not msgs: print("inbox empty")
             else:
                 for m in msgs: print(_line(m))
+                print(f"(open one with: {Path(sys.argv[0]).name} read {a.agent} <id>)", file=sys.stderr)
         elif a.cmd == "read":
             m, box = get(a.agent, a.id)
             if a.json: _dump(m)

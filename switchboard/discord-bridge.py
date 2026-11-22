@@ -517,7 +517,8 @@ def clock(s): s = int(max(0, s)); return f"{s // 60}:{s % 60:02d}"
 
 class Bridge:
     def __init__(self):
-        self.cfg = load("config.json", None) or sys.exit("run setup first")
+        self.cfg = load("config.json", None) or sys.exit(f"This root has no Discord setup yet ({dpath('config.json')} is missing). Run first:\n  "
+                                                         f"{Path(sys.executable).name} {Path(__file__).name} setup --guild <your server id>\ndocs/discord-setup.md explains where the id comes from.")
         self.st = self.load_state(); self.state_saved = fleet.saved_at(fleet.host_path(dpath("state.json"), hostname()))  # named in each lease renewal, see peer_synced
         self.ch, self.owner = self.cfg["channels"], self.cfg["owner_id"]
         self.dirty, self.last_sweep, self.last_tick, self.last_q, self.saved = set(), 0.0, 0.0, 0.0, ""
@@ -4306,6 +4307,14 @@ def ensure_lock():
     save("config.json", {**load("config.json", {}), "lease_msg": [th, mid]})
     return True
 
+def need_token():
+    """Stop with what to do, not a traceback, when this device has no bot token yet."""
+    try: ok = bool(TOKEN.read_text(encoding="utf-8").strip())
+    except OSError: ok = False
+    if not ok:
+        sys.exit(f"No Discord bot token on this device yet. The owner creates a bot and saves its token, as one line, in:\n  {TOKEN}\n"
+                 "docs/discord-setup.md has the steps (about ten minutes, once). Never put the token in a chat, a repository or the shared Queue folder.")
+
 def register_owner():
     """The owner's human mailbox, registered through the mail module: its CLI refuses to register a human unless a person
     runs it at a real terminal. An existing owner mailbox keeps its settings."""
@@ -4323,8 +4332,12 @@ def main():
     for s_ in (sys.stdout, sys.stderr):
         try: s_.reconfigure(encoding="utf-8", errors="replace")
         except Exception: pass
+    if a.cmd in ("setup", "run"): need_token()
     if a.cmd == "setup":
-        setup(a.guild)
+        try: setup(a.guild)
+        except DiscordError as e:
+            sys.exit(f"Discord refused: {str(e)[:200]}\nCheck that --guild is your server's id, that the bot was invited to that server with the link in "
+                     "docs/discord-setup.md, and that the token in the token file is the bot's current one.")
         print("registered the owner mailbox" if register_owner() else "owner mailbox already registered")
         return print("created the bridge lock" if ensure_lock() else "bridge lock already set up")
     if a.cmd == "refresh": save(f"refresh.{hostname()}.json", {"at": time.time()}); return print("asked the running bridge to refresh every open thread")

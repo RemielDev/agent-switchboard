@@ -39,7 +39,8 @@ Then either connect Discord ([docs/discord-setup.md](docs/discord-setup.md), ten
 
 ```
 python3 switchboard/agent-mail.py send --from <device-agent> --to orchestrator --subject "Hello" --body "List the repos you can see." --needs-reply
-python3 switchboard/agent-mail.py inbox <device-agent>
+python3 switchboard/agent-mail.py inbox <device-agent>                # lists the reply's id
+python3 switchboard/agent-mail.py read <device-agent> <id>           # prints it
 ```
 
 (`<device-agent>` is the mailbox the doctor made for your own sessions on this device; it prints the name.)

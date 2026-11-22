@@ -1647,7 +1647,7 @@ class Runner:
                 try: save_reading(out)
                 except Exception as e: say(f"plan reading not saved for {mid}: {e}")
             fleet.event("done", msg.get("subject", ""), detail=result, agent=agent, thread=msg.get("thread", ""), repo=msg.get("repo") or "", ref=mid, **ses)
-            tail = f" in {secs}s" + (f" cost=${cost}" if cost is not None else "")
+            tail = f" in {secs}s" + (f" cost=${float(cost):.2f}" if cost is not None else "")
             if msg.get("reply_to") and not msg.get("needs_reply") and not a.always_reply and str(msg.get("from", "")).lower() != NOTIFY:  # the owner's answers always get the reply: they are waiting in Discord
                 mail.ack(agent, mid, result=result, by=self.by)
                 say(f"done {mid} for {agent}{tail}: plain answer, acked without a reply")
@@ -1958,6 +1958,10 @@ def main():
                 ticked = time.monotonic()
                 try: load_loop().tick(r.mail, say)
                 except Exception as e: say(f"loop error: {type(e).__name__}: {e}")
+            if a.once and not a.dry_run:
+                mine = [n for n, i in r.mail.load_agents().items() if i.get("auto") and i.get("kind") == "claude"]
+                if not any(r.mail.list_inbox(n) for n in mine):
+                    say("nothing to do: no mail is waiting for an automatic agent" + (f" ({', '.join(sorted(mine))})" if mine else "; none is registered, run setup/doctor.py --fix"))
             r.one_pass()
         except KeyboardInterrupt:
             say("interrupted"); r.shutdown(); return 130

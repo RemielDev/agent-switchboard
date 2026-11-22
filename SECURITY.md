@@ -29,7 +29,9 @@ you run it unattended.
 - **Your session status, for the board.** With the session hooks installed, each interactive session's folder, state
   and last prompt are written to `Queue/sessions/` and shown in your `#sessions` channel.
 - **Screen captures are off.** The bridge can post one capture of a device where work is blocked; `setup` writes
-  `"screenshots": false`, and it stays off until you change it.
+  `"screenshots": false`, and it stays off until you change it. The bridge and the runner still take a small lock file
+  named `screencap-service` under `~/.switchboard/locks/`; it only decides which process would answer a capture
+  request and captures nothing by itself.
 
 ## What the code enforces
 

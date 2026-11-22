@@ -61,7 +61,8 @@ agent doing the setup should ask before running it. `--dry-run` shows the change
   session here. Keep its folder out of sync so each device has its own.
 - `scopes`: `root` is a workspace folder and `canonical` is the vault `MEMORY.md` that governs it and everything
   under it. `memoryctl.py init` adds these for you and links `<root>/MEMORY.md` to the vault file so other
-  tools find the same rules. It refuses a folder that already has its own `CLAUDE.md` or `AGENTS.md`: move those
+  tools find the same rules. It also writes `<root>/.claude/settings.local.json` there, so Claude Code's own auto memory for that project lands in
+  the vault. It refuses a folder that already has its own `CLAUDE.md` or `AGENTS.md`: move those
   rules into the vault first, so there is one home for them.
 
 The registry is per device (paths differ between machines); the vault is shared.

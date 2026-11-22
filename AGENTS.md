@@ -16,6 +16,15 @@ almost everything yourself; the steps only the owner can do are marked **OWNER S
 - **Change nothing outside this checkout, the root's `Queue/` folder and `~/.switchboard/`** unless a step says so.
 - `setup/doctor.py` is the source of truth. Run it after every step; it is safe to run as often as you like.
 
+## Commands on your platform
+
+- This guide writes `python3`. On Windows type `python` (or `py -3`) instead. The doctor prints every follow-up
+  command the way it must be typed on this machine, with full paths, so copy its `->` lines rather than retyping.
+- `~` is the home folder (`%USERPROFILE%` on Windows).
+- Run the commands from the checkout folder unless a full path is given.
+- macOS and Windows are the supported platforms. On Linux the mail, runner and bridge work, `setup/autostart.py`
+  prints a systemd user unit for you to install by hand, and screen captures and the housekeeper are not available.
+
 ## Step 0. Ask the owner four things
 
 1. **Root folder.** Which folder holds their project folders (their "repos")? Example: `~/Developer`. The shared
@@ -30,8 +39,8 @@ almost everything yourself; the steps only the owner can do are marked **OWNER S
 
 | Needed | Check | If missing |
 |---|---|---|
-| Python 3.11 or newer | `python3 --version` | python.org, Homebrew (`brew install python`) or winget (`winget install Python.Python.3.12`) |
-| Claude Code CLI, signed in | `claude --version`, then `claude -p "say ready"` | https://docs.claude.com/en/docs/claude-code/setup (signing in is an **OWNER STEP**) |
+| Python 3.11 or newer | `python3 --version` (Windows: `python --version`) | python.org, Homebrew (`brew install python`), winget (`winget install Python.Python.3.12`), or on Linux your distribution's package or `uv python install 3.12` |
+| Claude Code CLI, signed in | `claude --version` (step 4 proves it is signed in, so no extra test run is needed) | https://docs.claude.com/en/docs/claude-code/setup (signing in is an **OWNER STEP**) |
 | git | `git --version` | the platform's usual installer |
 
 Optional, only if the owner wants them: the Codex CLI (a second engine for builds and reviews), Syncthing (shares
@@ -50,8 +59,9 @@ git clone https://github.com/RemielDev/agent-switchboard.git
 cd agent-switchboard
 ```
 
-A checkout that sits directly inside the root needs no configuration: the scripts find the root as the folder that
-contains the checkout, and on a second device the same layout works again. If the checkout must live elsewhere, pass
+**The folder you clone into is the root.** A checkout that sits directly inside the root needs no configuration:
+the scripts take the folder that contains the checkout as the root, and on a second device the same layout works
+again. After the next step, check that the doctor's `root` line names the folder the owner gave you. If the checkout must live elsewhere, pass
 `--root <root>` to the doctor in the next step; it remembers the path in `~/.switchboard/root`. The environment
 variable `SWITCHBOARD_ROOT` overrides both.
 
@@ -69,61 +79,91 @@ interactive sessions. It never overwrites a file that exists. Lines marked TODO 
 
 ## Step 4. Prove the core works, without Discord
 
-Send the orchestrator one message as this device's interactive agent (use the agent name the doctor printed for
-"your interactive sessions"; it is the lower-case host name), run the runner once, and read the answer:
+Send the orchestrator one message as this device's interactive agent, run the runner once, and read the answer.
+`<device-agent>` is the name the doctor printed on its line "your interactive sessions on this device" (the
+lower-case host name).
 
 ```
 python3 switchboard/agent-mail.py send --from <device-agent> --to orchestrator --subject "Hello" --body "Reply with the single word: ready." --needs-reply
 python3 switchboard/mail-runner.py --once --mcp
 python3 switchboard/agent-mail.py inbox <device-agent>
+python3 switchboard/agent-mail.py read <device-agent> <id from the inbox line>
 ```
 
-The second command starts one headless Claude Code run and takes a minute or two. An answer in the inbox means
-mail, the runner and Claude Code all work. Show the owner the answer. If the run fails, read the runner's output:
-the usual causes are Claude Code not being signed in, or a usage limit.
+What each one prints when it works:
+
+1. `send` prints the new message's id, for example `20270105T101500Z-3fa9c2d1`.
+2. The runner prints a `start ...` line and, 10 seconds to 2 minutes later, `done ... replied to <device-agent>`
+   (in its first line, `caps=0/h 0/day` means no run caps are set). It
+   starts one real headless Claude Code run, so it uses a little of the owner's Claude usage (a few cents at API
+   prices). If it prints `nothing to do`, the message did not reach an automatic agent: check the `--to` name.
+3. `inbox` lists one line per waiting message: id, sender, subject.
+4. `read` prints the message; its last lines are the orchestrator's answer. Show the owner that answer.
+
+Tell the owner before you run it: the run happens in the root folder with permission mode `acceptEdits`, so the
+orchestrator may read anything under the root and edit files there if a request asks it to. This test request only
+asks for one word. If the run fails, read the runner's output: the usual causes are Claude Code not being signed in,
+or a usage limit.
 
 You cannot send as `owner` from here, by design: the mail CLI refuses to speak as a person unless a person is
 typing at a real terminal. That is what stops agents from approving their own questions.
 
 ## Step 5. Connect Discord (skip if the owner said no)
 
-Follow `docs/discord-setup.md`. In short:
+Two things here only the owner can do. If they are not at the keyboard, finish the other steps and hand them this
+message, filled in (the doctor's `discord token` line has the exact token path on this machine; `doctor --fix`
+already created that folder, so the owner only saves one file):
 
-1. **OWNER STEP**: create a private Discord server (or pick one only they are in), create an application and bot at
-   https://discord.com/developers/applications, turn on the **Message Content Intent**, invite the bot with the
-   link from `docs/discord-setup.md`, and save the bot token into `~/.switchboard/discord/token.txt` themselves.
-2. **OWNER STEP**: give you the server id (Discord: Settings, Advanced, Developer Mode; then right-click the server,
-   Copy Server ID). The id is not a secret.
-3. You: `python3 switchboard/discord-bridge.py setup --guild <server id>`. It creates the channels, records the
-   server owner as the only person the bridge obeys, and registers the slash commands.
-4. You: `python3 switchboard/discord-bridge.py run` in a terminal the owner can see, and ask the owner to type
-   a request in `#orchestrator`. With the runner also running (`python3 switchboard/mail-runner.py --mcp`), the
-   request gets its own thread, a status message and then the answer.
+> To connect Discord I need two things from you, about ten minutes in total. The full steps are in
+> `docs/discord-setup.md` in the checkout.
+> 1. Create a bot: https://discord.com/developers/applications, New Application, Bot tab, turn on **Message Content
+>    Intent**, press **Reset Token**, and save the token as a single line in the file `<token path>`. Do not paste
+>    the token to me or anywhere else.
+> 2. Invite the bot to a private server that only you are in, using the invite link in `docs/discord-setup.md`
+>    with your application's Client ID, then send me the **server id** (Discord Settings, Advanced, turn on Developer
+>    Mode; right-click the server, Copy Server ID). The id is not a secret.
+
+When you have the server id and the token file exists:
+
+1. `python3 switchboard/discord-bridge.py setup --guild <server id>`. It creates the channels, records the server
+   owner as the only person the bridge obeys, registers the slash commands and creates the `owner` mailbox. It ends
+   with a line that starts `setup ok:`. A missing token or a wrong id stops with a plain message saying which.
+2. Start the bridge and the runner, each in its own terminal the owner can see, and leave both running:
+   `python3 switchboard/discord-bridge.py run` and `python3 switchboard/mail-runner.py --mcp`. The bridge prints
+   `gateway connected`.
+3. Ask the owner to type a request in `#orchestrator`. It gets its own thread, a status message and then the answer.
 
 ## Step 6. Session hooks (optional, ask first)
 
-`python3 switchboard/install-session-hooks.py --dry-run` shows the change; without `--dry-run` it adds hook entries
-to `~/.claude/settings.json` (and a `notify` line for Codex when it has none), after copying each file to a backup.
-With the hooks, the owner's own interactive sessions appear in Discord, and a permission request that arrives
-while they are away from the keyboard is forwarded to them with Allow once and Deny buttons. `--remove` undoes it.
+`python3 switchboard/install-session-hooks.py --dry-run` shows the change and writes nothing. Without `--dry-run` it
+adds hook entries to `~/.claude/settings.json` (and a `notify` line for Codex when it has none), after copying each
+file to a backup. With the hooks, the owner's own interactive sessions appear in Discord, and a permission request
+that arrives while they are away from the keyboard is forwarded to them with Allow once and Deny buttons. `--remove`
+undoes it.
+
+If the doctor says the hooks are "installed from ANOTHER checkout", this machine already has a copy of this project
+somewhere else. Installing would point the hooks at this checkout instead; the dry run lists each one with what it
+replaces. Ask the owner which checkout should own them before you change anything.
 
 ## Step 7. Mail tools inside the owner's own sessions (optional)
 
-```
-claude mcp add --scope user agent_mail -- python3 <root>/agent-switchboard/switchboard/agent-mail-mcp.py --agent <device-agent>
-```
-
-After that an interactive Claude Code session can list agents, send work to the orchestrator and read replies.
+The doctor prints the exact command on its line "mail tools for your own sessions": a `claude mcp add ...` with this
+machine's Python and the full path to `agent-mail-mcp.py`. Use that line as printed (it is correct on Windows too).
+It registers an MCP server in the owner's Claude Code user settings, so ask first. After that an interactive Claude
+Code session can list agents, send work to the orchestrator and read replies.
 
 ## Step 8. Start at login (only after a yes)
 
 ```
-python3 setup/autostart.py show       # prints exactly what would be installed
-python3 setup/autostart.py install    # the mail runner and the Discord bridge
+python3 setup/autostart.py show       # installs nothing; prints each login item: the command, when it runs, its log, how to undo
+python3 setup/autostart.py install    # adds them
 python3 setup/autostart.py remove     # undo
 ```
 
-Until then the owner starts the two processes by hand when they want agents available.
+Show the owner the `show` output and wait for a yes. The mail runner is always included; the Discord bridge is added
+only once Discord is set up on this device, because before that it would only exit at every login. On Linux `install`
+prints a systemd user unit and the two commands to enable it instead of installing anything. Until the owner says
+yes, they start the processes by hand when they want agents available.
 
 ## Step 9. A second device (optional)
 
@@ -135,14 +175,28 @@ and takes over only when the first stops. The bot token is saved separately on e
 ## Step 10. Shared memory and skills (optional)
 
 `docs/memory-and-skills.md` explains the two small pieces: a loader that feeds scoped `MEMORY.md` rule files to
-Claude Code sessions and runner turns, and `setup/skills-sync.sh`, which keeps one shared folder of agent skills
-linked into every tool.
+Claude Code sessions and runner turns, and `setup/skills-sync.sh` (bash: macOS and Linux), which keeps one shared
+folder of agent skills linked into every tool (create the shared folder first, for example `<root>/agent-skills`;
+without it the script says so and does nothing). Reading the doc, `memoryctl.py check` and `memoryctl.py lint` change
+nothing and need no permission. Two things to tell the owner before you run them, because they write
+outside this checkout: `setup/install-memory.py --hooks` changes `~/.claude/settings.json` (it has a `--dry-run`), and
+`switchboard/memoryctl.py init <project>` adds a `MEMORY.md` link and a `.claude/settings.local.json` inside that
+project folder.
 
 ## When you are done
 
-Run `python3 setup/doctor.py` once more and give the owner a short report: what is set up, what is still TODO and
-why, how to start and stop things (`Queue/STOP` pauses every runner), and where the docs are. Tell them to read
-`SECURITY.md` before raising the permission mode or enabling start at login.
+Run the doctor once more and give the owner a short report in this shape:
+
+> **Set up:** Agent Switchboard in `<root>/agent-switchboard`, root `<root>`. Agents registered: orchestrator,
+> builder, reviewer. Test message answered: "<the answer>".
+> **Not done yet, and why:** (for example) Discord: needs your bot token and server id, see my message above.
+> Start at login: not installed, you asked to see it first; here is what it would add: ...
+> **How to use it now:** start `python3 switchboard/mail-runner.py --mcp` (and `discord-bridge.py run` once Discord
+> is set up), then type in `#orchestrator`. To pause every agent, create the file `<root>/Queue/STOP`; delete it
+> to resume.
+> **What it can touch:** agents run as you, in permission mode `acceptEdits`, inside `<root>`. Read `SECURITY.md`
+> before raising that mode or turning on start at login.
+> **What I changed on this machine:** the checkout, `<root>/Queue/`, and `~/.switchboard/` (list anything else).
 
 ## If something is wrong
 

@@ -25,6 +25,20 @@ AGENTS = {  # name -> (kind, auto, hosts: "any" or "here", description)
     "reviewer": ("claude", True, "here", "Reviews work it did not write. Read-only."),
 }
 
+def py():
+    """How to start this Python, as someone would type it: the short name when that is this interpreter, else its full path."""
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        try:
+            if found and os.path.samefile(found, sys.executable): return name
+        except OSError: pass
+    return f'"{sys.executable}"'
+
+def cmd(script, *args):
+    """A command that works from any folder on this platform: this interpreter and the script's full path."""
+    path = str(REPO / script)
+    return " ".join([py(), f'"{path}"' if " " in path else path, *args])
+
 def load(name, filename):
     spec = importlib.util.spec_from_file_location(name, SWITCHBOARD / filename)
     mod = importlib.util.module_from_spec(spec); sys.modules[name] = mod; spec.loader.exec_module(mod)
@@ -34,7 +48,7 @@ class Report:
     def __init__(self): self.rows = []
     def add(self, status, what, detail="", cmd=""): self.rows.append({"status": status, "check": what, "detail": detail, "command": cmd})
     def ok(self, what, detail=""): self.add("OK", what, detail)
-    def fix(self, what, detail=""): self.add("FIX", what, detail, "python3 setup/doctor.py --fix")
+    def fix(self, what, detail=""): self.add("FIX", what, detail, cmd("setup/doctor.py", "--fix"))
     def todo(self, what, detail="", cmd=""): self.add("TODO", what, detail, cmd)
     def note(self, what, detail="", cmd=""): self.add("NOTE", what, detail, cmd)
 
@@ -57,7 +71,7 @@ def check(fix, root_arg, name_arg):
     import common
     root = common.dev_root()
     how = "SWITCHBOARD_ROOT" if os.environ.get("SWITCHBOARD_ROOT") else "~/.switchboard/root" if (Path.home() / ".switchboard" / "root").is_file() else "the folder this checkout sits in"
-    if not root.is_dir(): r.todo("root", f"{root} does not exist (from {how})", "python3 setup/doctor.py --fix --root <folder that holds your repos>"); return r
+    if not root.is_dir(): r.todo("root", f"{root} does not exist (from {how})", cmd("setup/doctor.py", "--fix", "--root", "<folder that holds your repos>")); return r
     r.ok("root", f"{root} (from {how})")
     queue = root / "Queue"
     if not queue.is_dir() and not fix: r.fix("queue", f"{queue} is missing")
@@ -109,17 +123,25 @@ def check(fix, root_arg, name_arg):
     try: cfg = json.loads((queue / "discord" / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError): cfg = {}
     if token.is_file() and token.read_text(encoding="utf-8").strip(): r.ok("discord token", str(token))
-    else: r.todo("discord token", f"create a bot at https://discord.com/developers/applications and save its token in {token} (docs/discord-setup.md)")
+    else:
+        if fix: token.parent.mkdir(parents=True, exist_ok=True)  # so the owner only has to save one file
+        r.todo("discord token", f"OWNER STEP: create a bot (docs/discord-setup.md, about ten minutes) and save its token, as one line, in {token}")
     if cfg.get("guild_id") and cfg.get("channels"): r.ok("discord server", f"configured, {len(cfg['channels'])} channels")
-    else: r.todo("discord server", "not set up", f"python3 {SWITCHBOARD / 'discord-bridge.py'} setup --guild <your server id>")
+    else: r.todo("discord server", "not set up; needs the token first, then the server id from the owner", cmd("switchboard/discord-bridge.py", "setup", "--guild", "<your server id>"))
 
     try: settings = (Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8")
     except OSError: settings = ""
-    if "session-hook.py" in settings: r.ok("session hooks", "installed in ~/.claude/settings.json")
-    else: r.todo("session hooks", "optional: shows your own sessions in Discord and forwards permission requests when you are away", f"python3 {SWITCHBOARD / 'install-session-hooks.py'}")
+    here = [str(SWITCHBOARD / "session-hook.py"), (SWITCHBOARD / "session-hook.py").as_posix()]
+    flat = settings.replace("\\\\", "\\")  # JSON doubles the backslashes of a Windows path
+    if any(h in flat for h in here): r.ok("session hooks", "installed in ~/.claude/settings.json, from this checkout")
+    elif "session-hook.py" in settings:
+        r.note("session hooks", "installed from ANOTHER checkout, not this one; running the installer would point them here, so ask the owner first",
+               cmd("switchboard/install-session-hooks.py", "--dry-run"))
+    else: r.todo("session hooks", "optional: shows your own sessions in Discord and forwards permission requests when you are away; see what it changes first",
+                 cmd("switchboard/install-session-hooks.py", "--dry-run"))
     r.note("mail tools for your own sessions", "optional: lets an interactive Claude Code session send and read agent mail",
            f"claude mcp add --scope user agent_mail -- {sys.executable} {SWITCHBOARD / 'agent-mail-mcp.py'} --agent {mine}")
-    r.note("start at login", "optional, ask the owner first", "python3 setup/autostart.py show")
+    r.note("start at login", "optional, ask the owner first", cmd("setup/autostart.py", "show"))
 
     try:
         fleet = load("fleet", "fleet.py"); fleet.beat()
@@ -139,7 +161,7 @@ def main():
     else:
         for x in r.rows:
             print(f"{x['status']:5} {x['check']:34} {x['detail']}" + (f"\n      -> {x['command']}" if x["command"] and x["status"] != "OK" else ""))
-        print("\nCore ready: mail, agents and the runner. TODO lines are optional extras (Discord, hooks)." if not need else "\nNot ready: run `python3 setup/doctor.py --fix`, then handle the TODO lines." if any(x["status"] == "FIX" for x in need) else "\nNot ready: handle the TODO lines above.")
+        print("\nCore ready: mail, agents and the runner. TODO lines are optional extras (Discord, hooks)." if not need else f"\nNot ready: run `{cmd('setup/doctor.py', '--fix')}`, then handle the TODO lines." if any(x["status"] == "FIX" for x in need) else "\nNot ready: handle the TODO lines above.")
     return 0 if not need else 1
 
 if __name__ == "__main__": sys.exit(main())

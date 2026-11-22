@@ -15,7 +15,7 @@ no administrator rights. Linux: prints a systemd user unit for you to install by
 
 --permission-mode is passed to the mail runner (default acceptEdits). Unattended runs cannot answer a permission
 dialog, so anything outside that mode is refused unless you allow it in your Claude Code settings."""
-import argparse, os, shutil, subprocess, sys
+import argparse, json, os, shutil, subprocess, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -29,9 +29,28 @@ WIN = {"runner": ("Switchboard-MailRunner", "mail"), "bridge": ("Switchboard-Dis
        "queue": ("Switchboard-QueueRunner", "queue"), "house": ("Switchboard-Housekeeper", "house")}
 SCRIPT = {"runner": "mail-runner.py", "bridge": "discord-bridge.py", "queue": "queue-runner.py", "house": "housekeeper.py"}
 
+def discord_ready():
+    """True once this device has a bot token and the root has a Discord config: before that the bridge would only exit."""
+    try:
+        token = (Path.home() / ".switchboard" / "discord" / "token.txt").read_text(encoding="utf-8").strip()
+        cfg = json.loads((dev_root() / "Queue" / "discord" / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError): return False
+    return bool(token and cfg.get("guild_id"))
+
 def chosen(a):
     picked = [k for k in ("runner", "bridge", "queue", "house") if getattr(a, k, False)]
-    return picked or ["runner", "bridge"]
+    if picked: return picked
+    if discord_ready(): return ["runner", "bridge"]
+    print("bridge: left out, Discord is not set up on this device yet. Run this again after `discord-bridge.py setup`, or pass --bridge to add it anyway.")
+    return ["runner"]
+
+ARGS = {"runner": "--poll 10 --permission-mode {mode} --mcp", "bridge": "run", "queue": "--poll 60", "house": ""}
+def describe(name, mode):
+    """What a login item does, in words: shown by `show` and before `install` writes anything."""
+    return (f"  runs:   {sys.executable} -u {SWITCHBOARD / SCRIPT[name]} {ARGS[name].format(mode=mode)}".rstrip() + "\n"
+            f"  root:   {dev_root()}\n"
+            "  when:   at every login of this user; started again if it exits (after a STOP file, it waits)\n"
+            "  undo:   autostart.py remove")
 
 def mac_plist(name, mode):
     text = (TEMPLATES / f"{MAC[name]}.plist").read_text(encoding="utf-8")
@@ -54,11 +73,12 @@ def linux_unit(name, mode):
             f"ExecStart={sys.executable} -u {SWITCHBOARD / SCRIPT[name]} {args}\nRestart=always\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n")
 
 def install(a, dry):
+    if dry: print("Nothing is installed by `show`. These login items would be added by `install`:\n")
     for name in chosen(a):
         if sys.platform == "darwin":
             if name not in MAC: print(f"{name}: no login item on macOS (the housekeeper is Windows only; run queue-runner.py by hand)"); continue
             dest = Path.home() / "Library" / "LaunchAgents" / f"{MAC[name]}.plist"
-            print(f"{name}: {dest}")
+            print(f"{name}: launchd agent {dest}\n{describe(name, a.permission_mode)}\n  log:    ~/Library/Logs/switchboard-{'mail-runner' if name == 'runner' else 'discord-bridge'}.log")
             if dry: continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
@@ -67,7 +87,7 @@ def install(a, dry):
             print("  loaded" if r.returncode == 0 else f"  launchctl load failed: {r.stderr.strip()}")
         elif os.name == "nt":
             key, cmd = WIN[name][0], win_command(name, a.permission_mode)
-            print(f"{name}: HKCU Run entry {key}\n  {cmd}")
+            print(f"{name}: HKCU Run entry {key}\n{describe(name, a.permission_mode)}\n  entry:  {cmd}\n  log:    <root>\\Queue\\worker-{WIN[name][1]}-<computer name>.log")
             if dry: continue
             r = subprocess.run(["reg", "add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", key, "/t", "REG_SZ", "/d", cmd, "/f"], capture_output=True, text=True)
             print("  added (starts at next logon)" if r.returncode == 0 else f"  reg add failed: {r.stderr.strip()}")
