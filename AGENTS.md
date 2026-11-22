@@ -38,7 +38,9 @@ Optional, only if the owner wants them: the Codex CLI (a second engine for build
 the root between devices), Tailscale (lets devices reach each other away from home), and a small-model CLI named
 `agy` that the Discord bridge can use for triage and tidying. Everything degrades to the plain path without them.
 
-No Python packages are needed. Every script uses the standard library only.
+No Python packages are needed. Every script uses the standard library only. One optional exception on Windows, which ships no
+time zone database: `python -m pip install tzdata` lets the runner read a usage-limit reset time that names another
+time zone; without it such times are read as local time.
 
 ## Step 2. Put the checkout inside the root
 

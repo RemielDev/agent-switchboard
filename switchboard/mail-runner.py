@@ -397,6 +397,8 @@ def run_plan_checks(cwd, text, limit=6, timeout=300, changed=(), dev_root=None):
     for c in cmds:
         try: parts = shlex.split(c, posix=os.name != "nt")
         except ValueError: parts = []
+        if os.name == "nt":  # the non-POSIX split keeps the quotes around an argument; the command runs without a shell, so drop them
+            parts = [a[1:-1] if len(a) >= 2 and a[0] == a[-1] and a[0] in "\"'" else a for a in parts]
         tool = Path(parts[0]).name.lower().removesuffix(".exe") if parts else ""
         if not parts or CHECK_BAD.search(c) or tool not in CHECK_CMDS or Path(parts[0]).name != parts[0]:
             rows.append(f"- NOT RUN `{c[:100]}`: only a single command from this list is allowed, without pipes, redirects or paths: {', '.join(sorted(CHECK_CMDS))}"); continue

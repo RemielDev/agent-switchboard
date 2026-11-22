@@ -22,11 +22,14 @@ jobs:
         run: python tools/check-clean.py
       - name: Unit tests
         run: |
-          python -m pip install pytest
+          python -m pip install pytest tzdata
           python -m pytest tests -q
       - name: Routing rules
+        if: ${{ !cancelled() }}
         run: python switchboard/route-test.py
       - name: Concurrency rules
+        if: ${{ !cancelled() }}
         run: python -X utf8 switchboard/concurrency-test.py
       - name: Discord bridge against a fake Discord
+        if: ${{ !cancelled() }}
         run: python -X utf8 switchboard/discord-bridge-test.py
