@@ -173,7 +173,7 @@ def setup():
     os.environ.pop("AGENT_MAIL_PARENT", None)  # this harness may itself be running inside a runner turn
     agent_mod = agent_mod or load_module("agent_mail_test", "agent-mail.py")
     for n, k, auto in (("owner", "human", False), ("sessions", "human", False), ("orchestrator", "claude", True), ("builder", "claude", True), ("mac", "claude", False)):
-        agent_mod.register(n, "any", k, auto=auto)
+        agent_mod.register(n, MAC if n == "mac" else "any", k, auto=auto)
     q = tmp / "Queue"; (q / "discord").mkdir(parents=True, exist_ok=True)
     (q / "discord/config.json").write_text(json.dumps({"guild_id": GUILD, "owner_id": OWNER, "bot_id": BOT, "cards": False, "smart_buttons": False, "argon_chat": False, "self_reload": False, "overview_threads": True, "hosts": [PC, MAC],
         "channels": {"orchestrator": PARENT, "progress": PROGRESS, "threads": THREADS, "reports": REPORTS, "alerts": ALERTS}}), encoding="utf-8")
@@ -553,7 +553,7 @@ def test_questions_settled_elsewhere():
     assert gq["id"] in b.st["q"] and not spawned, "work from before the question is not a candidate"
     (sd / "s7.json").write_text(json.dumps({**rec2, "project": "kepler", "state": "idle", "prompt_at": CLOCK.time() + 20, "updated": CLOCK.time() + 40}), encoding="utf-8"); look(); look()
     assert gq["id"] in b.st["q"] and len(spawned) == 1 and spawned[0]["kind"] == "settled" and "Publish v1?" in spawned[0]["question"], "unrelated work leaves it open, asked once"
-    verdict = {"done": True, "why": "it published v1", "session": "s7"}
+    verdict = {"done": True, "why": "it published v1", "session": "s7"}; CLOCK.offset += bridge_mod.SETTLE_RECHECK  # after a "no" the same question waits before it is judged again
     (sd / "s7.json").write_text(json.dumps({**rec2, "project": "kepler", "state": "idle", "last_prompt": "publish v1", "last_reply": "Published v1.", "prompt_at": CLOCK.time() + 50, "updated": CLOCK.time() + 60}), encoding="utf-8"); look(); look()
     assert len(spawned) == 2 and settled(gq["id"]) and any("finished it in a claude session on the Mac: it published v1" in m["content"] for m in cards())
     assert not b.st["settle_checks"], "checks of closed questions are dropped"
@@ -5090,6 +5090,176 @@ def test_takeover_primary_reclaim_wait_is_capped_at_10_minutes():
         stale_mac_serving(th, lm); mac_renews(th, lm)  # the Mac served again and the PC is back again
         assert not b.is_active(), "a later return waits again: the cap does not carry over"
     finally: bridge_mod.hostname = real_host; b.cfg["hosts"] = real_hosts; b.cfg.pop("lease_msg", None)
+
+def asks_doc():
+    f = tmp / f"Queue/asks/open.{bridge_mod.hostname()}.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else {}
+def all_cards(): return [m for c in fake.channels.values() for m in c["msgs"].values()]
+def asked_card(key):
+    """The card of question KEY, found by the message id the bridge recorded (its buttons are gone once it closes)."""
+    mid = (b.st["q"].get(key) or {}).get("msg") or CARD_IDS.get(key)
+    return next(m for m in all_cards() if m["id"] == mid)
+CARD_IDS = {}
+def remember(key): CARD_IDS[key] = b.st["q"][key]["msg"]; return key
+
+def test_open_questions_are_published_for_sessions_and_closes_carry_how():
+    origin, mid = request()
+    q = question(mid, body="Merge PR 6?", options=("Merge", "Not now")); tick(); sweep_tick()
+    d = asks_doc(); row = next(r for r in d["open"] if r["id"] == q["id"])
+    assert row["options"] == ["Merge", "Not now"] and row["from"] == "orchestrator" and row["link"].startswith("https://discord.com/channels/" + GUILD) and row["tid"]
+    press(PARENT, q["id"], 0); tick(); sweep_tick()
+    d = asks_doc(); assert not any(r["id"] == q["id"] for r in d["open"])
+    c = next(x for x in d["closed"] if x["id"] == q["id"]); assert c["how"] == "answered on Discord: Merge", c
+    pq = agent_mod.send("sessions", "owner", "Permission: Bash in x on y", "Answer within 8 minutes.", options=[{"label": "Allow once"}, {"label": "Deny"}]); tick(); sweep_tick()
+    assert not any(r["id"] == pq["id"] for r in asks_doc()["open"]), "a permission prompt is the session's own, not listed"
+    CLOCK.offset += bridge_mod.ASKS_CLOSED_KEEP + 60; sweep_tick()
+    assert not any(x["id"] == q["id"] for x in asks_doc()["closed"]), "closes are kept two days"
+
+def test_answer_relayed_from_a_session_closes_the_card_and_reaches_the_asker():
+    origin, mid = request()
+    q = question(mid, body="Deploy the fix?", options=("Deploy it", "Not yet")); tick(); remember(q["id"])
+    before = len(inbox("orchestrator"))
+    agent_mod.send("orchestrator", "owner", f"[relay] {q['id']}", "x", check_repo=False, control={"target": q["id"], "op": "relay", "option": 0, "words": "deploy it", "where": "x"}); tick()
+    assert q["id"] in b.st["q"], "an automatic agent never answers for him"
+    agent_mod.send("mac", "owner", f"[relay] {q['id']}", "Deploy it", check_repo=False, control={"target": q["id"], "op": "relay", "option": 0, "text": None, "words": "yes deploy it", "where": "a claude session on the Mac (Orbit)"}); tick()
+    assert q["id"] not in b.st["q"]
+    got = [m for m in inbox("orchestrator")[before:] if m.get("reply_to") == q["id"]]
+    assert got and got[0]["from"] == "owner" and got[0]["body"].startswith("Deploy it") and "yes deploy it" in got[0]["body"], got
+    card = asked_card(q["id"]); assert "**Answer:** Deploy it" in card["content"] and "Answered in a claude session on the Mac (Orbit)" in card["content"] and not card["components"]
+    sweep_tick(); c = next(x for x in asks_doc()["closed"] if x["id"] == q["id"]); assert c["how"].startswith("answered in a claude session on the Mac"), c
+    # a free answer that is not a button
+    q2 = question(mid, body="Which colour?", options=("Red", "Blue")); tick()
+    agent_mod.send("mac", "owner", f"[relay] {q2['id']}", "green", check_repo=False, control={"target": q2["id"], "op": "relay", "option": None, "words": "green like the logo", "where": "a claude session on the Mac"}); tick()
+    assert q2["id"] not in b.st["q"] and any(m["body"].startswith("green like the logo") for m in inbox("orchestrator") if m.get("reply_to") == q2["id"]), "his words, as he wrote them"
+    # an answer to wording he saw before the agent changed the question is refused
+    q3 = question(mid, body="Publish v3?", options=("Publish", "Wait")); tick()
+    agent_mod.amend("orchestrator", q3["id"], "Publish v4?"); tick()
+    agent_mod.send("mac", "owner", f"[relay] {q3['id']}", "publish", check_repo=False, control={"target": q3["id"], "op": "relay", "option": 0, "words": "publish", "where": "x", "rev": 0}); tick()
+    assert q3["id"] in b.st["q"] and b.st["q"][q3["id"]]["rev"] == 1
+    # the same relay read twice (a crash before it was acked) answers once
+    relay = {"target": q3["id"], "op": "relay", "option": 0, "words": "publish", "where": "x", "rev": 1}
+    agent_mod.send("mac", "owner", f"[relay] {q3['id']}", "publish", check_repo=False, control=relay)
+    tick(); assert q3["id"] not in b.st["q"]
+    b.st["q"][q3["id"]] = {**b.st["q_closed"][q3["id"]], "id": q3["id"], "from": "orchestrator", "options": [{"label": "Publish"}, {"label": "Wait"}], "rev": 1, "at": CLOCK.time() - 5, "thread": None}
+    agent_mod.send("mac", "owner", f"[relay] {q3['id']}", "publish", check_repo=False, control=relay); tick()
+    assert sum(1 for m in inbox("orchestrator") if m.get("reply_to") == q3["id"]) == 1, "never two answers to one question"
+
+def test_answer_from_a_session_still_counts_after_the_card_closed_on_his_activity():
+    """His session looked busy with the question, so the card closed as settled; his answer from there, arriving a moment
+    later, still reaches the agent that asked."""
+    agent_mod.register("pc", PC, "codex", auto=False)
+    mq = agent_mod.send("mac", "owner", "Unlock it?", "Unlock it?", options=[{"label": "Unlocked"}, {"label": "Later"}]); tick(); remember(mq["id"])
+    (tmp / "Queue/mail/origins").mkdir(parents=True, exist_ok=True)
+    (tmp / f"Queue/mail/origins/{mq['id']}.json").write_text(json.dumps({"host": MAC, "cwd": "/x/Nova", "root": "/x/Nova"}), encoding="utf-8")
+    sd = tmp / f"Queue/sessions/{MAC}"; sd.mkdir(parents=True, exist_ok=True)
+    (sd / "s9.json").write_text(json.dumps({"session_id": "s9", "host": MAC, "tool": "claude", "project": "Nova", "cwd": "/x/Nova", "root": "/x/Nova", "state": "idle", "last_prompt": "later", "prompt_at": CLOCK.time() + 30, "updated": CLOCK.time() + 30}), encoding="utf-8")
+    b.last_elsewhere = 0; sweep_tick(); assert mq["id"] not in b.st["q"]
+    agent_mod.send("pc", "owner", f"[relay] {mq['id']}", "later", check_repo=False, control={"target": mq["id"], "op": "relay", "option": 1, "words": "later", "where": "a codex session on the PC"}); tick()
+    assert any(m.get("reply_to") == mq["id"] and m["body"].startswith("Later") for m in inbox("mac"))
+    assert b.st["q_closed"][mq["id"]]["how"] == "answered in a codex session on the PC: Later" and "late" not in b.st["q_closed"][mq["id"]]
+    agent_mod.send("pc", "owner", f"[relay] {mq['id']}", "unlocked", check_repo=False, control={"target": mq["id"], "op": "relay", "option": 0, "words": "unlocked", "where": "x"}); tick()
+    assert sum(1 for m in inbox("mac") if m.get("reply_to") == mq["id"]) == 1, "only the first late answer counts"
+
+def test_retired_thread_stays_closed():
+    o1, m1 = request("Kepler: merge the bikes PR")
+    old = agent_mod.send("orchestrator", "owner", "Kepler: merge PR 6?", "Tap Merge to ship PR 6.", reply_to=m1, repo="Kepler", check_repo=False, options=[{"label": "Merge"}, {"label": "Not now"}]); tick()
+    o2, m2 = request("Kepler: fences")
+    agent_mod.send("orchestrator", "owner", "Kepler: merge PR 7?", "PR 7 holds PR 6.\n\nREPLACES: " + old["id"], reply_to=m2, repo="Kepler", check_repo=False, options=[{"label": "Merge"}, {"label": "Not now"}]); tick()
+    for m in list(inbox("orchestrator")): agent_mod.ack("orchestrator", m["id"])
+    t1 = b.st["threads"][b.resolve(m1)]
+    CLOCK.offset += bridge_mod.RETIRE_AFTER + 5; b.last_clean = 0; sweep_tick()
+    assert t1.get("archived") and t1.get("closed") and not t1.get("retire")
+    b.last_clean = 0; sweep_tick(); assert fake.channels[t1["dthread"]].get("archived"), "keep-visible does not bring it back"
+
+def test_settle_question_from_a_session_or_the_orchestrator():
+    origin, mid = request()
+    q = question(mid, body="Publish v3?", options=("Publish", "Wait")); tick(); remember(q["id"])
+    agent_mod.send("builder", "owner", f"[settle] {q['id']}", "not mine to close", check_repo=False, control={"target": q["id"], "op": "settle"}); tick()
+    assert q["id"] in b.st["q"], "another automatic agent may not close his question"
+    agent_mod.register("janitor", "any", "claude", auto=False)
+    agent_mod.send("janitor", "owner", f"[settle] {q['id']}", "machine mailbox", check_repo=False, control={"target": q["id"], "op": "settle"}); tick()
+    assert q["id"] in b.st["q"], "a machine mailbox that is not one of his sessions may not close it either"
+    agent_mod.send("mac", "owner", f"[settle] {q['id']}", "published v3 in this session", check_repo=False, control={"target": q["id"], "op": "settle"}); tick()
+    assert q["id"] not in b.st["q"]
+    card = asked_card(q["id"]); assert "Settled elsewhere:** published v3 in this session (mac)" in card["content"] and not card["components"]
+    q2 = question(mid, body="Old plan?", options=("A", "B")); tick()
+    agent_mod.send("orchestrator", "owner", f"[settle] {q2['id']}", "the newer plan covers it", check_repo=False, control={"target": q2["id"], "op": "settle"}); tick()
+    assert q2["id"] not in b.st["q"]
+
+def test_replaces_closes_the_older_question_and_retires_its_thread():
+    o1, m1 = request("Kepler: merge the bikes PR")
+    old = agent_mod.send("orchestrator", "owner", "Kepler: merge PR 6?", "Tap Merge to ship PR 6.", reply_to=m1, repo="Kepler", check_repo=False, options=[{"label": "Merge"}, {"label": "Not now"}]); tick(); remember(old["id"])
+    o2, m2 = request("Kepler: fences")
+    new = agent_mod.send("orchestrator", "owner", "Kepler: merge PR 7?", "Tap Merge to ship PR 7, which also holds PR 6.\n\nREPLACES: " + old["id"], reply_to=m2, repo="Kepler", check_repo=False, options=[{"label": "Merge"}, {"label": "Not now"}]); tick()
+    assert old["id"] not in b.st["q"] and new["id"] in b.st["q"]
+    nq = b.st["q"][new["id"]]; assert "REPLACES" not in nq["body"] and "REPLACES" not in asked_card(new["id"])["content"]
+    oc = asked_card(old["id"]); assert "Replaced by the newer question" in oc["content"] and not oc["components"]
+    t1 = b.st["threads"][b.resolve(m1)]; assert t1.get("retire")
+    th1 = t1["dthread"]; assert not fake.channels[th1].get("archived")
+    for m in list(inbox("orchestrator")): agent_mod.ack("orchestrator", m["id"])  # nothing left running in the old thread
+    CLOCK.offset += bridge_mod.RETIRE_AFTER + 5; b.last_clean = 0; sweep_tick()
+    assert fake.channels[th1].get("archived"), "the old thread closes once its only question moved"
+    side = (tmp / f"Queue/discord/sidechat/{b.resolve(m1)}.jsonl").read_text(encoding="utf-8")
+    assert new["id"] in side, "the old thread's orchestrator learns where its question went"
+    # replaces naming a question that is newer, or unknown, changes nothing
+    later = agent_mod.send("orchestrator", "owner", "Kepler: x?", "x?\n\nREPLACES: 20990101T000000Z-deadbeef", reply_to=m2, repo="Kepler", check_repo=False, options=[{"label": "A"}, {"label": "B"}]); tick()
+    assert later["id"] in b.st["q"] and new["id"] in b.st["q"]
+
+def test_supersede_pass_closes_older_questions_a_newer_one_covers():
+    spawned = []
+    def fake_spawn(path):
+        job = json.loads(Path(path).read_text(encoding="utf-8")); spawned.append(job)
+        ids = [x["id"] for x in job["questions"]]; old, new = order[0], order[-1]  # by when each was asked, not by id: two ids from one second sort at random
+        Path(path).with_name(Path(path).stem + ".out.json").write_text(json.dumps({"replaced": [{"old": old, "by": new, "why": "PR 7 holds PR 6"}, {"old": new, "by": old, "why": "backwards"}] if old in ids and new in ids else []}), encoding="utf-8")
+    order = []
+    b.triage_spawn = fake_spawn
+    o1, m1 = request("Atlas.app: merge")
+    a = agent_mod.send("orchestrator", "owner", "Atlas.app: merge PR 6?", "Tap Merge to ship PR 6 with the login fix.", reply_to=m1, repo="Atlas.app", check_repo=False, options=[{"label": "Merge"}, {"label": "Not now"}]); tick(); remember(a["id"]); order.append(a["id"])
+    b.last_supersede = 0; sweep_tick(); assert not spawned, "one question alone is not checked"
+    CLOCK.offset += 2
+    o2, m2 = request("Atlas.app: backend")
+    c = agent_mod.send("orchestrator", "owner", "Atlas.app: merge PR 7?", "PR 7 adds checkout on top of everything in PR 6. Merge it?", reply_to=m2, repo="atlas.app", check_repo=False, options=[{"label": "Merge PR 7"}, {"label": "Later"}]); tick()
+    assert a["id"] in b.st["q"], "different buttons: not the same question to the old rule"
+    order.append(c["id"]); b.last_q = CLOCK.time() + 10 ** 6  # nothing below runs a pass before the test asks for one
+    b.last_supersede = 0; sweep_tick(); assert len(spawned) == 1 and spawned[0]["kind"] == "supersede" and len(spawned[0]["questions"]) == 2
+    b.last_supersede = 0; sweep_tick()
+    assert not any("backwards" in str(x) for x in b.st["q_closed"].values()), "a newer question is never closed by an older one"
+    assert a["id"] not in b.st["q"] and c["id"] in b.st["q"], "only the older one closes, never the newer"
+    assert "PR 7 holds PR 6" in asked_card(a["id"])["content"]
+    b.last_supersede = 0; sweep_tick(); assert len(spawned) == 1, "a project with one question left is not asked again"
+    # a verdict about questions that changed while it ran is dropped
+    o3, m3 = request("Atlas.app: third")
+    e = agent_mod.send("orchestrator", "owner", "Atlas.app: icons?", "Which icon set?", reply_to=m3, repo="Atlas.app", check_repo=False, options=[{"label": "Line"}, {"label": "Solid"}]); tick()
+    b.last_supersede = 0; sweep_tick(); assert len(spawned) == 2
+    agent_mod.amend("orchestrator", c["id"], "PR 7 is now only the icon change. Merge it?"); tick()
+    b.last_supersede = 0; sweep_tick(); assert c["id"] in b.st["q"] and e["id"] in b.st["q"], "stale verdict dropped"
+
+def test_question_in_a_closed_thread_settles_after_a_while():
+    origin, mid = request()
+    q = question(mid, body="Still?", options=("Yes", "No")); tick(); remember(q["id"])
+    t = b.st["threads"][b.resolve(mid)]; t["archived"] = True
+    b.last_elsewhere = 0; sweep_tick(); assert q["id"] in b.st["q"]
+    CLOCK.offset += bridge_mod.ARCHIVED_Q_AFTER + 60; b.last_elsewhere = 0; sweep_tick()
+    assert q["id"] not in b.st["q"] and "its thread was closed" in asked_card(q["id"])["content"]
+    # an old question whose thread was closed only now waits the full time from then
+    q2 = question(mid, body="Again?", options=("Yes", "No")); tick(); t["archived"] = False
+    CLOCK.offset += bridge_mod.ARCHIVED_Q_AFTER + 60; b.last_elsewhere = 0; sweep_tick(); assert q2["id"] in b.st["q"]
+    t["archived"] = True; b.last_elsewhere = 0; sweep_tick(); assert q2["id"] in b.st["q"], "closed seconds ago: not settled yet"
+
+def test_settle_check_waits_before_judging_the_same_question_again():
+    verdict = {"done": False, "why": "unrelated", "session": ""}; spawned = []
+    def fake_spawn(path):
+        spawned.append(1); Path(path).with_name(Path(path).stem + ".out.json").write_text(json.dumps(verdict), encoding="utf-8")
+    b.triage_spawn = fake_spawn
+    gq = agent_mod.send("orchestrator", "owner", "Kepler: fences?", "How to stop bikes going through fences?", repo="Kepler", options=[{"label": "Colliders"}, {"label": "Leave"}], check_repo=False); tick()
+    sd = tmp / f"Queue/sessions/{MAC}"; sd.mkdir(parents=True, exist_ok=True)
+    def work(n): (sd / "s1.json").write_text(json.dumps({"session_id": "s1", "host": MAC, "tool": "claude", "project": "Kepler", "state": "idle", "last_prompt": f"bug {n}", "prompt_at": CLOCK.time() + 20, "updated": CLOCK.time() + 30, "started": CLOCK.time()}), encoding="utf-8")
+    def look(): b.last_elsewhere = 0; sweep_tick()
+    work(1); look(); look(); assert len(spawned) == 1
+    for n in range(2, 6): CLOCK.offset += 120; work(n); look(); look()
+    assert len(spawned) == 1, "new turns on other bugs within 20 minutes do not ask Gemini again"
+    CLOCK.offset += bridge_mod.SETTLE_RECHECK; work(9); look(); look(); assert len(spawned) == 2
+
 
 def main():
     want = sys.argv[1] if len(sys.argv) > 1 else ""

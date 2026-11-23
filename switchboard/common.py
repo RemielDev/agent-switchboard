@@ -35,6 +35,24 @@ def queue_root():
         (q / d).mkdir(parents=True, exist_ok=True)
     return q
 
+def project_key(name):
+    """'My.App', 'my-app' and 'My App' are one project."""
+    import re
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+def open_questions(max_age=86400):
+    """The questions waiting on the owner and the ones closed in the last two days, as the serving Discord bridge last
+    wrote them to Queue/asks/open.<host>.json (the freshest file wins). Read by session-hook.py, which shows them in the
+    owner's own sessions, and by agent-mail-mcp.py. {"open": [], "closed": [], "at": 0} when no bridge wrote one lately."""
+    best = {"open": [], "closed": [], "at": 0}
+    for f in (queue_root() / "asks").glob("open.*.json"):
+        try: d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError): continue
+        if isinstance(d, dict) and float(d.get("at") or 0) > float(best.get("at") or 0): best = d
+    import time
+    if time.time() - float(best.get("at") or 0) > max_age: return {"open": [], "closed": best.get("closed") or [], "at": best.get("at") or 0}
+    return best
+
 def syncthing_api():
     """Return (base_url, api_key) for this user's Syncthing, or (None, None)."""
     base = os.environ.get("SYNCTHING_URL")

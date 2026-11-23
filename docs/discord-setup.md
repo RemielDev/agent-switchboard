@@ -73,7 +73,8 @@ Type a request in `#orchestrator`. To start both at login, see `setup/autostart.
   name and a colon (`builder: ...`) to address that agent directly.
 - **Inside a thread**, anything you type continues that piece of work. While a question with buttons is open, typed
   text answers it.
-- **Questions** arrive as buttons. A question is always the last message in its thread.
+- **Questions** arrive as buttons. A question is always the last message in its thread. The same questions also show in
+  your own Claude Code sessions with your next message there; answer at either end and the other closes.
 - **"Do your recommendations"**, typed in `#orchestrator` or in a thread, lets the orchestrator answer its own open
   questions with the option it recommends. Buttons that deploy, push, publish, spend or delete are never pressed
   for you.

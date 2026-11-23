@@ -215,6 +215,25 @@ is in [how-it-works.md](how-it-works.md).
 - **Rejected:** dollars only.
 - **Why:** subscription users run into the limit, not a bill.
 
+### Questions asked at both ends, closed at both ends
+
+- **Decision:** every open question is a Discord card and is also shown in the owner's own Claude Code sessions with
+  their next message (`Queue/asks`, read by the session hook). An answer at either end closes the other: a session
+  passes on an answer with `answer_question`, which only accepts words the owner typed or picked there after the
+  question was asked, and the asker gets those words as written.
+- **Rejected:** Discord as the only place to answer; and a session relaying answers without a check.
+- **Why:** the owner may look at Discord or at the session first. A model in a session can misreport an answer, so
+  the delivered answer is bound to words that were really typed, and only a mailbox bound to one device may relay.
+
+### One open question per decision
+
+- **Decision:** `ask_owner` first returns the questions already open on the same repo or thread and sends nothing,
+  so the agent names the ones its question replaces; a small-model pass catches overlaps the agents miss, and a
+  replaced card points at the newer one while its thread is archived.
+- **Rejected:** leaving every question up until the owner answers it.
+- **Why:** an older "merge PR 6" card stayed up for days next to a newer "merge PR 7" that already held it; the
+  agent that asks knows best what its new question covers, and only an older question is ever closed by a newer one.
+
 ### Small helpers on a separate, optional small-model CLI
 
 - **Decision:** triage, the janitor, topic labels and the housekeeper's judge use a small Gemini model through the

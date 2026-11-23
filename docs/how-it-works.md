@@ -150,9 +150,19 @@ on Linux) only when you ask. `setup/install-memory.py` creates a starter vault a
    one more step for the builder (same model, same session), a new plan, or a full review by the other model family
    (a mail to `reviewer` whose first line is `FULL REVIEW: <reason>`). A review request for a small job is answered by
    the runner with "Review skipped". `turn_runs` caps build and review runs between two of your messages.
-8. **Questions.** An agent calls `ask_owner`. The bridge posts a card with up to 5 buttons and **Done elsewhere**, as
-   the last message in the thread. A tap, a typed message while it is open, or a Discord reply to the card answers
-   it. Open cards are closed as settled when another mail answered them or your own session took over.
+8. **Questions, at both ends.** An agent calls `ask_owner`. The bridge posts a card with up to 5 buttons and **Done
+   elsewhere**, as the last message in the thread, and lists every open question in `Queue/asks/open.<host>.json`.
+   Your own Claude Code (and Codex) sessions show each new one with your next message there, through the session hook,
+   so you see it wherever you look first. One answer closes both ends: a tap, a typed message or a Discord reply to
+   the card answers it in Discord, and the session hears it was settled; an answer you give in a session is passed on
+   by that session with `answer_question`, which checks your quoted words against what you really typed or picked
+   there, and the card closes saying where you answered. A session whose own work did what a question asks closes it
+   with `settle_question`. Before asking, `ask_owner` shows the agent the questions already open on the same repo or
+   thread, and the agent names the ones its question replaces, so you answer once (a newer pull request that holds the
+   older one's changes replaces the older ask). A small model (`triage.py`, kind `supersede`) catches the overlaps
+   agents miss. Replaced cards point at the newer question, and a thread left with nothing to wait for is archived.
+   Cards are also closed when another mail answered them, when a session of yours took over, or when their thread
+   stayed closed for 6 hours.
 9. **"Do your recommendations".** Typed in `#orchestrator` (all open questions) or a thread (that thread's), it records
    a go-ahead for the questions open now, valid for 2 hours, and mails the orchestrator the list. The orchestrator
    answers each with its recommended option. The bridge accepts those answers only from `orchestrator`, only for
@@ -206,7 +216,8 @@ Queue/
   changes/<repo or area>/<host>.jsonl  one line per build
   open/<host>/<id>.json         "Open in Claude" and open-a-file requests for that device; <id>.done.json answers
   captures/                     screen capture requests in transit, removed after upload or 15 minutes
-  sessions/<host>/<id>.json     your interactive sessions
+  sessions/<host>/<id>.json     your interactive sessions (recent prompts, for answer_question's check)
+  asks/open.<host>.json         open questions and the ones closed in the last two days, from the serving bridge
   topics/labels.json            topic labels
   playbooks/                    per-project lessons
   loop/
