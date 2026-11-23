@@ -263,6 +263,12 @@ class _Roots:
 ROOTS = _Roots()
 Q_ROW_V = 2  # question button layout; 2 added Done elsewhere. Raising it re-edits every open card once
 ELSEWHERE_EVERY = 60  # seconds between looks for questions settled outside Discord
+ASKS_EVERY = 600  # Queue/asks/<host>.json, the open questions the owner's own Claude and Codex sessions show them, is rewritten at least this often
+ASKS_CLOSED_KEEP = 2 * 86400  # a closed question stays in that file this long, so a session that showed it learns it is settled
+SETTLE_RECHECK = 20 * 60  # after "not settled", the same question is not judged again sooner, however busy the owner's sessions are
+SUPERSEDE_EVERY = 5 * 60  # how often open questions on one project are checked for ones a newer question makes unnecessary
+ARCHIVED_Q_AFTER = 6 * 3600  # a question left open in a thread that was closed (archived) is settled after this long
+RETIRE_AFTER = 120  # a thread whose only question was replaced is archived after this long, once nothing is running in it
 PERMISSION_GRACE = 120  # past a permission hook's own wait, its card is closed
 RELOAD_FILES = ("discord-bridge.py", "cards.py", "fleet.py", "notes.py", "agent-mail.py", "topics.py", "screencap.py", "common.py")  # what the running bridge has loaded
 ASKS_OWNER = re.compile(r"\b(your (choice|call|go-ahead)|give me (a|the) go-ahead|let me know|tell me (which|whether|if)|should i|do you want|want me to)\b", re.I)
@@ -409,6 +415,12 @@ def strip_linked(body):
     """(text, thread ids) for a body whose last line is 'LINKED: id id ...'; ids always hold a digit, so a sentence is left alone."""
     lines = (body or "").rstrip().splitlines()
     hit = re.fullmatch(r"\s*LINKED:\s*(\S*\d\S*(?:\s+\S*\d\S*)*)\s*", lines[-1]) if lines else None
+    return ("\n".join(lines[:-1]).rstrip(), hit[1].split()) if hit else (body, [])
+def strip_replaces(body):
+    """(text, question ids) for a question whose last line is 'REPLACES: id id ...' (ask_owner's replaces): the older
+    questions this one makes unnecessary. Only mail ids count, so a sentence that starts with the word is left alone."""
+    lines = (body or "").rstrip().splitlines()
+    hit = re.fullmatch(r"\s*REPLACES:\s*((?:\d{8}T\d{6}Z-[0-9a-f]{8}\s*)+)", lines[-1]) if lines else None
     return ("\n".join(lines[:-1]).rstrip(), hit[1].split()) if hit else (body, [])
 
 # ---- minimal WebSocket client (RFC 6455, text frames, client masking) ----
@@ -1781,13 +1793,182 @@ class Bridge:
             for m in api("GET", f"/channels/{self.q_channel(q or {})}/messages?limit=100"):
                 if any(str(c.get("custom_id", "")).startswith(f"a:{key}:") for c in walk_components(m.get("components"))): return m["id"]
         except Exception as e: log("find card failed", str(e)[:120])
-    def q_clear(self, q):
+    def q_clear(self, q, how=None, late_ok=False):
+        """A question left st["q"] (answered, settled, replaced, withdrawn). Its thread stops asking unless another
+        question is open there, and the close is recorded for the owner's sessions (Queue/asks), with HOW it closed.
+        LATE_OK: it was closed only because the owner's session looked busy with it, so an answer given there that arrives
+        afterwards (relay_answer) is still delivered; the record keeps what that needs."""
+        if q.get("id"):
+            c = self.st.setdefault("q_closed", {})
+            c[q["id"]] = {"how": clip(how or q.get("how") or "closed on Discord", 300), "at": time.time(), "subject": clip(q.get("subject") or "", 140), "project": self.q_project(q["id"], q) if q.get("id") else ""}
+            if late_ok: c[q["id"]]["late"] = {k: q.get(k) for k in ("from", "thread", "options", "body", "subject", "msg", "channel", "rev", "rev_at", "at")}
+            for k in sorted(c, key=lambda k: c[k]["at"])[:max(0, len(c) - 150)]: del c[k]
+            self.asks_dirty = True
         if q.get("thread") in self.st["threads"]:
             t = self.st["threads"][q["thread"]]
             rest = [x for x in self.st["q"].values() if x.get("thread") == q["thread"]]  # callers removed q already; the thread still asks while any other question is open
             if rest: t["asking"] = (max(rest, key=lambda x: float(x.get("at") or 0)).get("subject") or "")[:120]
             else: t.pop("asking", None)
             self.dirty.add(q["thread"])
+
+    # ---- one set of open questions for both ends: Discord here, the owner's own Claude and Codex sessions through Queue/asks ----
+    def q_link(self, q):
+        """A link to the question's card in Discord, for a session that shows it (an archived thread's <#id> would not open)."""
+        cid, mid = q.get("channel"), q.get("msg")
+        return f"https://discord.com/channels/{self.cfg.get('guild_id')}/{cid}/{mid}" if cid and mid and self.cfg.get("guild_id") else ""
+    def publish_asks(self, now=None):
+        """Write Queue/asks/<host>.json: every open question with its options, and the ones closed in the last two days with
+        how. session-hook.py shows them in the owner's interactive sessions and agent-mail-mcp.py's list_questions reads them,
+        so a question is asked at both ends and an answer at either end closes it at the other. Only the serving bridge
+        writes, so a standby bridge never shows questions it does not hold. Rewritten on change, else every ASKS_EVERY."""
+        now = now or time.time()
+        if not getattr(self, "asks_dirty", True) and now - getattr(self, "asks_at", 0) < ASKS_EVERY: return
+        closed = self.st.setdefault("q_closed", {})
+        for k in [k for k in closed if now - float(closed[k].get("at") or 0) > ASKS_CLOSED_KEEP]: del closed[k]
+        for k in set(getattr(self, "asks_shown", ())) - set(self.st["q"]) - set(closed):  # a removal path that gave no reason
+            closed[k] = {"how": "closed on Discord", "at": now, "subject": "", "project": ""}
+        rows = []
+        for key, q in sorted(self.st["q"].items(), key=lambda kv: float(kv[1].get("at") or 0)):
+            if q.get("from") == "sessions": continue  # a permission prompt belongs to the session it blocks, which shows it itself
+            t = self.st["threads"].get(q.get("thread")) or {}
+            rows.append({"id": key, "from": q.get("from"), "project": self.q_project(key, q), "subject": clip(q.get("subject") or "", 140),
+                         "question": clip(q.get("body") or "", 900), "options": [o.get("label", "") for o in (q.get("options") or [])], "tid": q.get("thread"), "rev": int(q.get("rev") or 0), "rev_at": q.get("rev_at"),
+                         "device_choice": any(o.get("action") or o.get("device") for o in (q.get("options") or [])),
+                         "thread": clean_title(t.get("title") or "", 90), "link": self.q_link(q), "at": float(q.get("at") or now)})
+        doc = {"host": hostname(), "at": now, "open": rows,
+               "closed": [{"id": k, **{x: y for x, y in v.items() if x != "late"}, **({"late_ok": True, "asked_at": v["late"].get("at"), "rev": int(v["late"].get("rev") or 0), "rev_at": v["late"].get("rev_at"),
+                                                                                    "options": [o.get("label", "") for o in v["late"].get("options") or []]} if v.get("late") else {})}
+                          for k, v in sorted(closed.items(), key=lambda kv: -float(kv[1].get("at") or 0))]}
+        try:
+            p = fleet.host_path(queue_root() / "asks" / "open.json", hostname()); p.parent.mkdir(parents=True, exist_ok=True)
+            fleet._write(p, doc)
+        except OSError as e: return log("open questions not written", str(e)[:120])
+        self.asks_dirty, self.asks_at, self.asks_shown = False, now, [r["id"] for r in rows]
+    def relay_answer(self, m, ctl):
+        """The owner answered a question in one of their own Claude or Codex sessions (agent-mail-mcp.py answer_question, which
+        checked that their quoted words are in what they typed there after the question was asked). It is taken as if they had
+        tapped or typed it here: the asker gets their answer and the card closes, saying where they answered. Only from an
+        interactive agent: a runner never speaks for them."""
+        if not self.owner_session(m.get("from")): return log("relayed answer refused, not an interactive session", m.get("from"))
+        key = ctl.get("target"); q = self.st["q"].get(key); late = None
+        where = clip(ctl.get("where") or f"a session on {m.get('from')}", 80); words = clip(" ".join(str(ctl.get("words") or "").split()), 300)
+        if not q:
+            late = ((self.st.get("q_closed") or {}).get(key) or {}).get("late")  # closed because the owner's session looked busy with it: their answer from there still counts
+            if not late: return log("relayed answer for a question already closed", key)
+            q = dict(late, id=key)
+        if ctl.get("rev") is not None and int(ctl.get("rev") or 0) != int(q.get("rev") or 0): return log("relayed answer refused, the question changed after the owner saw it", key)
+        opt = None
+        if ctl.get("option") is not None:
+            try: opt = (q.get("options") or [])[int(ctl["option"])]
+            except (TypeError, ValueError, IndexError): return log("relayed answer refused, no such option", key)
+            if opt.get("action"): return log("relayed answer refused, device-move button", key)
+        said = opt["label"] + (f" (device {opt['device']})" if opt and opt.get("device") else "") if opt else words
+        if not said: return log("relayed answer refused, empty", key)
+        again = self.replied(key, q)  # a relay read again after a crash: nothing is delivered twice
+        if not again: AM.reply("owner", key, f"{said}\n\n(the owner answered in {where}: \"{words}\")")
+        asker = q.get("from"); t = self.st["threads"].get(q.get("thread"))
+        if not again and not (load_agents().get(asker) or {}).get("auto") and asker != m.get("from"):  # another session's question: no runner reads that inbox
+            AM.send("owner", "orchestrator", word_cut(head_line(said), 80), f"the owner answered a question from `{asker}` in {where}. Act on it if that session has not.\n\nQuestion: {clip(q.get('body', ''), 800)}\n\nthe owner: {words or said}", needs_reply=True, reply_to=key)
+        self.st["q"].pop(key, None); self.q_clear(q, f"answered in {where}: {clip(said, 150)}")
+        if late: (self.st.get("q_closed") or {}).get(key, {}).pop("late", None)
+        if t:
+            t.pop("turn_answer", None); t["his_at"] = time.time()
+            if (load_agents().get(asker) or {}).get("auto"): self.touch(t); t["queued"] = time.time()
+            self.dirty.add(q["thread"])
+        if q.get("msg"):
+            try: self.edit_to(self.q_channel(q), q["msg"], clip(self.q_text(q), 1700) + f"\n**Answer:** {clip(said, 150)}\n-# Answered in {where}.", components=[])
+            except Exception as e: log("question card not updated", str(e)[:120])
+        self.q_answered(self.q_channel(q), q.get("msg"), *q.get("extra", [])); self.q_done_old(q)
+        log("answer relayed from a session", key, clip(said, 80))
+    def owner_session(self, name):
+        """True for the mailbox of the owner's own interactive sessions on one device (the mailbox named after it): a Claude or Codex agent no
+        runner answers, bound to one host. Machine mailboxes not bound to one host never qualify."""
+        info = load_agents().get(name) or {}
+        host = info.get("host")
+        return not info.get("auto") and info.get("kind") in ("claude", "codex") and bool(host) and host != "any" and not isinstance(host, list)
+    def replied(self, key, q):
+        """True when the asker already has an answer from the owner to question KEY (a reply mail in its inbox or done folder)."""
+        root = queue_root() / "mail" / str(q.get("from") or "")
+        for box in ("inbox", "done"):
+            try: names = [n for n in os.listdir(root / box) if n.endswith(".json") and n[:16] >= key[:16]]
+            except OSError: continue
+            for n in names:
+                try: x = json.loads((root / box / n).read_text(encoding="utf-8"))
+                except (OSError, ValueError): continue
+                if isinstance(x, dict) and x.get("reply_to") == key and x.get("from") == "owner": return True
+        return False
+    def settle_from(self, m, ctl):
+        """An agent says a question no longer needs the owner (agent-mail-mcp.py settle_question): their session did what it asks,
+        or newer work made it moot. Taken from the agent that asked, from the orchestrator, or from one of their own
+        interactive sessions; the card keeps its text, loses its buttons and says why and who closed it."""
+        info, key, who = load_agents().get(m.get("from")) or {}, ctl.get("target"), m.get("from")
+        q = self.st["q"].get(key)
+        if not q: return log("settle for a question already closed", key)
+        if who not in (q.get("from"), "orchestrator") and not self.owner_session(who): return log("settle refused", who, key)
+        self.settle(key, f"{clip(' '.join(str(m.get('body') or '').split()), 220)} ({who})")
+    def replace_q(self, old, new, why=""):
+        """Close OLD because NEW asks the same decision or includes it (the newer PR holds the older one's changes, the same
+        choice asked again in another thread). OLD's card points at NEW; its thread is archived once nothing runs in it."""
+        q, nq = self.st["q"].get(old), self.st["q"].get(new)
+        if not q or not nq or old == new or any(o.get("action") for o in (q.get("options") or [])): return False
+        self.st["q"].pop(old); link = self.q_link(nq)
+        self.q_clear(q, f"replaced by the newer question \"{clip(nq.get('subject') or '', 100)}\"" + (f": {clip(why, 160)}" if why else ""))
+        (self.st.get("settle_checks") or {}).pop(old, None)
+        if q.get("msg"):
+            note = f"-# Replaced by the newer question" + (f" [here]({link})" if link and nq.get("channel") != q.get("channel") else " below") + (f": {clip(why, 160)}" if why else ".")
+            try: self.edit_to(self.q_channel(q), q["msg"], clip(self.q_text(q), 1700) + "\n" + note, components=[])
+            except Exception as e: log("question card not updated", str(e)[:120])
+        self.q_answered(self.q_channel(q), q.get("msg"), *q.get("extra", [])); self.q_done_old(q)
+        ot = self.st["threads"].get(q.get("thread"))
+        if ot and q.get("thread") != nq.get("thread") and not any(x.get("thread") == q["thread"] for x in self.st["q"].values()): ot["retire"] = time.time()
+        if ot and (load_agents().get(q.get("from")) or {}).get("auto"):  # the agent that asked learns its question is folded into the newer one
+            try:
+                with open(self.sidechat_path(q["thread"]), "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"at": time.time(), "q": "(question replaced by the bridge)", "a": f"Your question \"{clip(q.get('subject') or '', 100)}\" ({old}) is closed: it is replaced by {new} in thread {nq.get('thread')}. Do not ask it again; that thread carries it."}, ensure_ascii=False) + "\n")
+            except Exception: pass
+        log("question replaced by a newer one", old, new, clip(why, 100))
+        return True
+    def supersede_pass(self, now):
+        """Gemini (triage.py, kind supersede) reads the open questions of each project that has two or more and names the
+        older ones a newer question makes unnecessary; those close as replaced. Asked again only when that project's set of
+        open questions changes. Agents that ask with replaces do this themselves; this catches the rest."""
+        if not self.cfg.get("supersede_check", True) or now - getattr(self, "last_supersede", 0) < SUPERSEDE_EVERY: return
+        self.last_supersede = now
+        chk = self.st.setdefault("supersede", {}); groups = {}
+        for key, q in self.st["q"].items():
+            if q.get("from") == "sessions" or any(o.get("action") for o in (q.get("options") or [])): continue
+            p = norm_name(self.q_project(key, q))
+            if p: groups.setdefault(p, []).append(key)
+        for p in [p for p in chk if p not in groups]: chk.pop(p)
+        def fp(keys): return hashlib.sha1(json.dumps([[k, self.st["q"][k].get("rev") or 0, self.st["q"][k].get("body") or "", [o.get("label") for o in (self.st["q"][k].get("options") or [])]] for k in sorted(keys)]).encode()).hexdigest()[:16]
+        for p, keys in groups.items():
+            sig = fp(keys)  # the ids and what each asks: an amended question is a new set
+            c = chk.get(p) or {}; path, out = dpath("settle") / f"sup-{p}.json", dpath("settle") / f"sup-{p}.out.json"
+            if c.get("state") == "running":
+                try: r = json.loads(out.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    if now - float(c.get("at") or 0) > 300: c.update(state="failed", at=now); log("supersede check timed out", p)
+                    continue
+                except (OSError, ValueError): continue
+                for f in (path, out): f.unlink(missing_ok=True)
+                if not isinstance(r.get("replaced"), list): c.update(state="failed", at=now); log("supersede check failed", p, str(r.get("error"))[:120]); continue
+                c.update(state="done")
+                if c.get("sig") != sig: log("supersede verdict dropped, the questions changed while it ran", p); c["sig"] = ""; continue
+                for x in r["replaced"]:
+                    o, n = str(x.get("old") or ""), str(x.get("by") or "")
+                    if o in self.st["q"] and n in self.st["q"] and float(self.st["q"][o].get("at") or 0) <= float(self.st["q"][n].get("at") or 0):
+                        self.replace_q(o, n, str(x.get("why") or ""))
+                continue
+            if len(keys) < 2 or (c.get("sig") == sig and not (c.get("state") == "failed" and now - float(c.get("at") or 0) > 1800)): continue  # a failed check is tried again after 30 minutes
+            if sum(1 for x in chk.values() if x.get("state") == "running") >= 1: continue  # one at a time
+            qs = [{"id": k, "from": self.st["q"][k].get("from"), "asked": datetime.datetime.fromtimestamp(float(self.st["q"][k].get("at") or now), datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                   "thread": clean_title((self.st["threads"].get(self.st["q"][k].get("thread")) or {}).get("title") or "", 90),
+                   "question": clip(f"{self.st['q'][k].get('subject') or ''}\n{self.st['q'][k].get('body') or ''}", 1500), "options": [o.get("label", "") for o in (self.st["q"][k].get("options") or [])]} for k in sorted(keys)]
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True); out.unlink(missing_ok=True)
+                path.write_text(json.dumps({"kind": "supersede", "project": p, "questions": qs}, ensure_ascii=False), encoding="utf-8"); self.triage_spawn(path)
+            except OSError as e: log("supersede check not started", p, str(e)[:120]); continue
+            chk[p] = {"sig": sig, "state": "running", "at": now}
     def answer_for_owner(self, m, ctl):
         """The orchestrator answers one of the owner's questions with its recommendation. Carried out only while their own
         go-ahead covers that question, and never for a button that deploys, pushes, publishes, spends or deletes."""
@@ -1800,7 +1981,7 @@ class Bridge:
         if opt.get("action") or opt.get("device") or RISKY_LABEL.search(opt["label"]): return log("recommended answer refused, risky button", key, opt["label"])
         why = " ".join(str(m.get("body") or "").split())[:300]
         AM.reply("owner", key, f"{opt['label']}\n\n(the owner told the orchestrator to use its recommendation. Its reason: {why})")
-        self.st["q"].pop(key); self.q_clear(q); g["qs"].remove(key)
+        self.st["q"].pop(key); self.q_clear(q, f"answered with the orchestrator's recommendation (you said go ahead): {opt['label']}"); g["qs"].remove(key)
         t = self.st["threads"].get(q.get("thread"))
         if t and (load_agents().get(q.get("from")) or {}).get("auto"): self.touch(t); t["queued"] = time.time(); self.dirty.add(q["thread"])
         if q.get("msg"):
@@ -1817,7 +1998,7 @@ class Bridge:
             try: self.delete_to(cid, mid)
             except Exception as e:
                 if " 404 " not in str(e): log("delete failed, will retry", key, str(e)[:120]); return
-        del self.st["q"][key]; self.q_clear(q); self.q_done_old(q)  # an earlier copy that will not delete is parked in st["q_old"], with its backoff
+        del self.st["q"][key]; self.q_clear(q, "withdrawn: no longer needed"); self.q_done_old(q)  # an earlier copy that will not delete is parked in st["q_old"], with its backoff
         log("question removed", key)
     def old_gone(self, cid, rec, key=""):
         """Remove the earlier copies of a moved question card whose delete failed. rec["old"] holds the ids still to go;
@@ -1859,6 +2040,7 @@ class Bridge:
                 log("old question copy given up on", rec["ch"], rec["old"], f"buttons still on {live}" if live else "buttons removed")
         for key, q in list(self.st["q"].items()):
             try:
+                q.setdefault("id", key)  # older records lack it; q_clear records closes by it
                 if self.q_stale(q): self.drop_q(key); continue
                 if q.get("old") and time.time() >= q.get("old_at", 0): self.old_gone(self.q_channel(q), q, key)
                 up = self.q_up(q)
@@ -1871,11 +2053,16 @@ class Bridge:
             self.last_elsewhere = time.time()
             try: self.elsewhere()
             except Exception as x: self.q_err("elsewhere", x)
+        try: self.supersede_pass(time.time())
+        except Exception as x: self.q_err("supersede", x)
+        try: self.publish_asks()
+        except Exception as x: self.q_err("asks", x)
     def elsewhere(self):
         """Close the cards of questions the owner settled outside Discord, so no thread keeps waiting on them for nothing:
         (a) a reply to the question is in the mail (typed at a terminal, or relayed by a session they answered in);
         (b) a permission prompt whose hook has stopped waiting, so its buttons would do nothing;
-        (c) an interactive Claude or Codex session asked it, and they have typed in that session since (they answered there).
+        (c) an interactive Claude or Codex session asked it, and they have typed in that session since (they answered there);
+        (d) its thread was closed (archived) and stayed closed for ARCHIVED_Q_AFTER: nobody is waiting on that card.
         The card keeps its text, loses its buttons and says how it was settled. Nothing is closed while mail cannot be read."""
         qs = self.st["q"]
         if not qs: return
@@ -1899,21 +2086,25 @@ class Bridge:
                 try: f.unlink()
                 except OSError: pass
         for key, q in list(qs.items()):
-            how = None
+            how, late = None, False
+            if not (self.st["threads"].get(q.get("thread")) or {}).get("archived"): q.pop("arch_seen", None)  # counted from when the thread was first seen closed
             if key in replies:
                 m = replies[key]; said = " ".join(str(m.get("body") or "").split())
                 how = f"answered{' at a terminal' if m.get('from') == 'owner' else ' through ' + str(m.get('from'))}: {clip(said, 160)}"
+            elif (self.st["threads"].get(q.get("thread")) or {}).get("archived") and now - float(q.setdefault("arch_seen", now)) > ARCHIVED_Q_AFTER:
+                how = "its thread was closed and nothing has happened there since"
             elif q.get("from") == "sessions" and str(q.get("subject") or "").startswith("Permission:"):
                 w = re.search(r"Answer within (\d+) minutes", str(q.get("body") or ""))
                 if now - float(q.get("at") or now) > (int(w.group(1)) if w else 8) * 60 + PERMISSION_GRACE: how = "the session stopped waiting for this; answer it on the device"
             else:
+                late = True  # settled because the owner's own session looked busy with it: an answer given there still counts if it arrives later
                 info = agents.get(q.get("from")) or {}
                 interactive = not info.get("auto") and info.get("kind") in ("claude", "codex")
                 if interactive: how = self.typed_since(key, q)
                 cands = None if how else self.worked_since(key, q, sessions)
                 if cands and interactive: how = self.worked_how(cands[0])  # a session asked the owner about this project and they went on with it in their sessions
                 elif cands: how = self.judge_settled(key, q, cands)  # an agent's question: the same project alone is not proof, a small model reads what the session did
-            if how: self.settle(key, how)
+            if how: self.settle(key, how, late_ok=late)
     def session_files(self):
         """Every session record on every host (Queue/sessions/<host>/<id>.json), read fresh; unreadable ones are skipped."""
         out = []
@@ -1947,10 +2138,12 @@ class Bridge:
         return f"you finished it in {where}: {clip(why, 200)}" if why else f"you went on with {s.get('project')} in {where} ({clip(s.get('last_prompt') or '', 120)})"
     def judge_settled(self, key, q, cands):
         """The triage model (triage.py, kind settled) reads the question and what those sessions did, and says whether one of them settled
-        it. Runs in its own process; its verdict is read on a later pass and kept until the sessions change. None until it says yes."""
+        it. Runs in its own process; its verdict is read on a later pass and kept until the sessions change. None until it says yes.
+        After a "no" the same question waits SETTLE_RECHECK before it is judged again: a busy day of sessions on one repo used
+        to re-ask Gemini every few minutes about work that had nothing to do with the question."""
         if not self.cfg.get("settle_check", True): return None
         checks, now = self.st.setdefault("settle_checks", {}), time.time()
-        sig = "|".join(f"{s.get('session_id')}@{int(float(s.get('updated') or 0))}" for s in cands[:4])
+        sig = f"r{int(q.get('rev') or 0)}|" + "|".join(f"{s.get('session_id')}@{int(float(s.get('updated') or 0))}" for s in cands[:4])  # a verdict is about one wording of the question
         path = dpath("settle") / f"{key}.json"; out = dpath("settle") / f"{key}.out.json"; c = checks.get(key)
         if c and c.get("sig") == sig:
             if c.get("state") == "running":
@@ -1963,11 +2156,12 @@ class Bridge:
                     try: f.unlink()
                     except OSError: pass
                 if not isinstance(r.get("done"), bool): c.update(state="failed", retry=now + 1800); log("settle check failed", key, str(r.get("error"))[:120]); return None
-                c.update(state="yes" if r["done"] else "no", why=str(r.get("why") or ""), session=str(r.get("session") or ""))
+                c.update(state="yes" if r["done"] else "no", why=str(r.get("why") or ""), session=str(r.get("session") or ""), judged=now)
                 log("settle check", key, c["state"], clip(c["why"], 120))
             if c.get("state") == "yes":
                 return self.worked_how(next((x for x in cands if str(x.get("session_id")) == c.get("session")), cands[0]), c.get("why") or "done there")
             if not (c.get("state") == "failed" and now >= float(c.get("retry") or 0)): return None
+        if c and c.get("state") == "no" and now - float(c.get("judged") or c.get("at") or 0) < SETTLE_RECHECK: return None
         if sum(1 for x in checks.values() if x.get("state") == "running") >= 2: return None  # at most two checks at once
         job = {"kind": "settled", "question": f"{q.get('subject') or ''}\n{q.get('body') or ''}"[:4000], "options": [o.get("label", "") for o in q.get("options") or []],
                "sessions": [{k: x.get(k) for k in ("session_id", "tool", "project", "first_prompt", "last_prompt", "last_reply")} | {"id": x.get("session_id")} for x in cands[:4]]}
@@ -1991,11 +2185,11 @@ class Bridge:
             if folders & mine and float(s.get("prompt_at") or 0) > float(q.get("at") or 0) + 5:
                 return f"you answered in the {s.get('project') or 'same'} session ({clip(s.get('last_prompt') or '', 120)})"
         return None
-    def settle(self, key, how, tapped=None):
+    def settle(self, key, how, tapped=None, late_ok=False):
         """Close an open question without sending any answer: its card keeps the text and shows HOW, without buttons."""
         q = self.st["q"].pop(key, None)
         if not q: return
-        self.q_clear(q); (self.st.get("settle_checks") or {}).pop(key, None)
+        self.q_clear(q, how, late_ok=late_ok); (self.st.get("settle_checks") or {}).pop(key, None)
         if q.get("thread") in self.st["threads"]: self.st["threads"][q["thread"]].pop("turn_answer", None)
         mid = q.get("msg")
         if mid and mid != tapped:
@@ -2033,11 +2227,13 @@ class Bridge:
         q["msg"] = new; q.setdefault("old", []).append(mid)
         self.old_gone(cid, q, key)  # a copy that will not delete stays on the question, for the retry and for drop_q
     def on_question(self, m, tid):
-        key, parts = m["id"], split_message(m.get("body", ""), 1700)
+        body, replaces = strip_replaces(m.get("body", ""))
+        key, parts = m["id"], split_message(body, 1700)
         q = self.st["q"].get(key)
         if not q:
-            q = {"from": m["from"], "options": m["options"], "subject": m.get("subject", ""), "body": m.get("body", ""), "thread": tid, "tail": parts[-1], "repo": m.get("repo") or ""}
-            q["shown"] = self.q_up(q); q["row_v"] = Q_ROW_V; q["at"] = time.time(); self.st["q"][key] = q
+            q = {"id": key, "from": m["from"], "options": m["options"], "subject": m.get("subject", ""), "body": body, "thread": tid, "tail": parts[-1], "repo": m.get("repo") or ""}
+            q["shown"] = self.q_up(q); q["row_v"] = Q_ROW_V; q["at"] = time.time(); self.st["q"][key] = q; self.asks_dirty = True
+            if replaces: q["replaces"] = replaces
         t = self.thread(tid, m.get("subject", ""), m); t["mailed"] = True; t["asking"] = m.get("subject", "")[:120]; t["last_mail"] = key
         if not q.get("msg"):  # one open question per decision: no double tap starts the same work twice
             for ch, old in t.pop("held_cards", []):  # cards put on hold earlier: the new question replaces them
@@ -2053,7 +2249,9 @@ class Bridge:
             mid, q["channel"] = self.say(tid, t, part); q.setdefault("extra", []).append(mid)
         if not q.get("msg"):
             q["msg"], q["channel"] = self.say(tid, t, self.q_text(q), components=self.q_row(key, q), ping=True, card=True)
-            self.drop_interim(t); self.drop_gemini_notes(t)
+            self.drop_interim(t); self.drop_gemini_notes(t); self.asks_dirty = True
+        for old in q.pop("replaces", []):  # the asker said this question makes those unnecessary (ask_owner replaces)
+            if old in self.st["q"] and float(self.st["q"][old].get("at") or 0) <= q["at"]: self.replace_q(old, key, "the agent that asked folded it into this one")
         if m.get("from") == "sessions" and not any(o.get("action") for o in q["options"]): self.want_shot(f"q:{key}", q["channel"], self.blocked_host(t, m), q["msg"])  # action buttons are about an offline device, which has no screen to show
 
     def drop_interim(self, t):
@@ -2525,6 +2723,8 @@ class Bridge:
     def amend(self, m, ctl):
         """An agent changes or withdraws something it told the owner. Only the original sender can."""
         if ctl.get("op") == "answer": return self.answer_for_owner(m, ctl)
+        if ctl.get("op") == "relay": return self.relay_answer(m, ctl)
+        if ctl.get("op") == "settle": return self.settle_from(m, ctl)
         if ctl.get("op") == "go_ahead":  # the owner said it in a Claude or Codex session they are typing in: those agents never run unattended
             info = load_agents().get(m.get("from")) or {}
             if info.get("auto") or info.get("kind") not in ("claude", "codex"): return log("go-ahead refused", m.get("from"))
@@ -2537,7 +2737,8 @@ class Bridge:
             for mid in q.pop("extra", []):
                 try: self.delete_to(self.q_channel(q), mid)
                 except Exception as e: log("delete failed", str(e)[:120])
-            q["body"] = q["tail"] = text; mid = q.get("msg") or self.find_card(target, q); q["msg"] = mid
+            q["body"] = q["tail"] = text; q["rev"] = int(q.get("rev") or 0) + 1; q["rev_at"] = time.time(); self.asks_dirty = True  # an answer to the old wording is refused
+            mid = q.get("msg") or self.find_card(target, q); q["msg"] = mid
             if mid: self.edit_to(self.q_channel(q), mid, self.q_text(q), components=self.q_row(target, q))
             return
         posted = self.st.setdefault("posted", {}); p = posted.get(target)
@@ -2640,7 +2841,7 @@ class Bridge:
                 mid = AM.send("owner", "orchestrator", word_cut(head_line(said), 80), f"The owner answered a question from `{asker}`, an interactive session that may be gone. "
                               f"Act on their words if that session has not.\n\nQuestion: {clip(self.st['q'][open_q].get('body', ''), 800)}\n\nThe owner: {said}{extra}{self.device_note(device)}",
                               needs_reply=True, reply_to=mid)["id"]; t["to"] = "orchestrator"
-            q = self.st["q"].pop(open_q); self.q_clear(q); self.hold_qs(tid, "Closed: you answered the same question above.", keep=open_q, asker=q.get("from"), like=q) if tid else None; t["last_mail"] = mid; moved(); self.q_answered(self.q_channel(q), q.get("msg"), *q.get("extra", []))
+            q = self.st["q"].pop(open_q); self.q_clear(q, f"answered on Discord: {clip(head_line(said), 150)}"); self.hold_qs(tid, "Closed: you answered the same question above.", keep=open_q, asker=q.get("from"), like=q) if tid else None; t["last_mail"] = mid; moved(); self.q_answered(self.q_channel(q), q.get("msg"), *q.get("extra", []))
             if q.get("msg"):
                 try: self.edit_to(self.q_channel(q), q["msg"], clip(self.q_text(q), 1800) + f"\n**Answer:** {clip(head_line(said), 150)}", components=[])
                 except Exception as e: log("question card not updated", str(e)[:120])
@@ -2667,7 +2868,9 @@ class Bridge:
         for key, q in list(self.st["q"].items()):
             if key == keep or q.get("thread") != tid or any(o.get("action") for o in q["options"]): continue  # device-move buttons are not the owner's decision to postpone
             if asker and (q.get("from") != asker or not same_question(q, like if like is not None else self.st["q"][keep])): continue
-            self.st["q"].pop(key); self.q_clear(q); held.append((key, q))
+            self.st["q"].pop(key); self.q_clear(q, note.rstrip(".")); held.append((key, q))
+            if asker and keep in self.st["q"] and self.st["q"][keep].get("thread") != tid and tid in self.st["threads"] and not any(x.get("thread") == tid for x in self.st["q"].values()):
+                self.st["threads"][tid]["retire"] = time.time()  # the same question moved to another thread: nothing is left here to wait for
             if q.get("msg") and q.get("thread") in self.st["threads"]: self.st["threads"][q["thread"]].setdefault("held_cards", []).append([self.q_channel(q), q["msg"]])
             if q.get("msg"):
                 try: self.edit_to(self.q_channel(q), q["msg"], clip(self.q_text(q), 1700) + f"\n-# {note}", components=[])
@@ -3309,7 +3512,7 @@ class Bridge:
             elif not act.get("none"):
                 AM.reply("owner", key, opt["label"] + (f" (device {opt['device']})" if opt.get("device") else ""))
             tapped, card = i["message"]["id"], qd.get("msg")
-            self.st["q"].pop(key, None); self.q_clear(qd)
+            self.st["q"].pop(key, None); self.q_clear(qd, f"answered on Discord: {opt['label']}")
             if qd.get("thread"): self.hold_qs(qd["thread"], "Closed: you answered the same question above.", keep=key, asker=qd.get("from"), like=qd)
             self.q_answered(i["channel_id"], tapped, card, *qd.get("extra", []))
             if qd.get("thread") in self.st["threads"]: self.st["threads"][qd["thread"]].pop("turn_answer", None)  # they answered: the next answer is a new message below the question, not an edit of one above it
@@ -3743,6 +3946,8 @@ class Bridge:
                 t = None if key.startswith("session:") else self.st["threads"].get(key)
                 if not t:
                     if key or idle < TIDY_UNKNOWN: continue  # tracked but its record is gone or of another kind: left alone
+                elif t.get("retire") and max(t.get("his_at", 0), t.get("active_at", 0)) <= t["retire"] + 5 and key not in busy and key not in asking and not t.get("asking"):
+                    if now - t["retire"] < RETIRE_AFTER: continue  # its question moved to a newer thread: nothing is left here to wait for
                 elif (self.in_sight(key, t, now) and (t.get("origin") or t.get("owner_at"))) or key in busy or key in asking or t.get("asking") or (wait := TIDY_WAIT.get(self.state_word(t))) is None: continue
                 elif min(idle, now - t.get("active_at", t["t0"])) < wait: continue
             elif th.get("parent_id") == self.ch.get("threads"):
@@ -3764,6 +3969,7 @@ class Bridge:
                 continue
             refused.pop(cid, None)
             if t: t["archived"] = True
+            if t and t.get("retire"): t["closed"] = True; t.pop("retire")  # as if the owner pressed Close: nothing brings it back into sight until something new happens there
             if c: c["archived"] = True
             log("idle thread closed", cid, str(th.get("name") or "")[:70], f"idle {idle / 60:.0f} min")
     def sweep_redirects(self, now):

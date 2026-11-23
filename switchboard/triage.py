@@ -229,6 +229,37 @@ def run_settled(job, exe, work):
         except (subprocess.TimeoutExpired, ValueError, KeyError, IndexError, OSError) as e: fails.append(f"{m}: {type(e).__name__}")
     return {"error": "no Gemini model answered", "fails": fails}
 
+SUPERSEDE_RULES = """The owner has several open questions from their agents about one repo or project, each waiting for their tap in Discord and in their
+Claude sessions. Find the OLDER questions that a NEWER one makes unnecessary, so they answer once instead of several times:
+the newer one asks the same decision again, or its answer settles the older one too (a newer pull request that already
+holds the older one's changes, a newer deploy or publish that includes what the older one would ship, a newer plan that
+replaces the older plan). Two different decisions on the same project are NOT a match: leave both open. Only ever name
+an older question as replaced by a newer one (by its asked time). When unsure, leave it open.
+why: one short plain sentence the owner reads on the closed card, naming what the newer question covers."""
+SUPERSEDE_SCHEMA = {"type": "object", "properties": {"replaced": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "by": {"type": "string"}, "why": {"type": "string"}}, "required": ["old", "by", "why"]}}}, "required": ["replaced"]}
+
+def supersede_prompt(job):
+    rows = [f"- id {q.get('id')} | asked {q.get('asked')} by {q.get('from')} | thread: {q.get('thread') or '-'} | buttons: {', '.join(q.get('options') or [])}\n  {' '.join(str(q.get('question') or '').split())}" for q in job.get("questions") or []]
+    return "\n".join([SUPERSEDE_RULES, "", f"PROJECT: {job.get('project') or '-'}", "", "OPEN QUESTIONS (oldest first)", *rows])[:16000]
+
+def run_supersede(job, exe, work):
+    fails, ids = [], {str(q.get("id")) for q in job.get("questions") or []}
+    for m in BTN_MODELS:
+        try:
+            r = subprocess.run([exe, "-p", NO_TOOLS + supersede_prompt(job), "--model", m, "--output-format", "json", "--json-schema", json.dumps(SUPERSEDE_SCHEMA),
+                                "--disable-slash-commands", "--print-timeout", "75s"], cwd=work, stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=85)
+            env = last_json(r.stdout)
+            if env.get("status") != "SUCCESS": fails.append(f"{m}: {str(env.get('error') or r.stderr or 'no output')[-160:]}"); continue
+            body = str(env.get("response") or ""); out = json.JSONDecoder().raw_decode(body[body.find("{"):])[0]
+            if isinstance(out.get("replaced"), list):
+                keep = [{"old": str(x["old"]), "by": str(x["by"]), "why": str(x.get("why") or "").strip()[:300]} for x in out["replaced"]
+                        if isinstance(x, dict) and str(x.get("old")) in ids and str(x.get("by")) in ids and x.get("old") != x.get("by")]
+                return {"replaced": keep, "model": m}
+            fails.append(f"{m}: answer did not fit the schema")
+        except (subprocess.TimeoutExpired, ValueError, KeyError, IndexError, OSError) as e: fails.append(f"{m}: {type(e).__name__}")
+    return {"error": "no Gemini model answered", "fails": fails}
+
 def run(job, models=None):
     models = models or {"buttons": BTN_MODELS, "chat": CHAT_MODELS}.get(job.get("kind"), MODELS)  # the tidy pass stays on Low: Medium took over 200 s on a full thread, High never answered
     exe = agy()
@@ -237,6 +268,9 @@ def run(job, models=None):
     fails = []
     if job.get("kind") == "settled":
         try: return run_settled(job, exe, work)
+        finally: shutil.rmtree(work, ignore_errors=True)
+    if job.get("kind") == "supersede":
+        try: return run_supersede(job, exe, work)
         finally: shutil.rmtree(work, ignore_errors=True)
     try:
         for m in models:

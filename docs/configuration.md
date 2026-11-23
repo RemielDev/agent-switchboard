@@ -102,6 +102,8 @@ on one device at a time. `templates/config/discord.config.example.json` shows a 
 | `smart_buttons` | on | not written | After an answer, a small-model pass suggests next-step buttons and tidies. Needs `agy`; without it the default buttons stay. |
 | `settle_check` | on | not written | A small-model check before an agent's question is closed as settled elsewhere. |
 | `done_elsewhere_button` | on | not written | Show **Done elsewhere** on question cards. |
+| `asks_in_sessions` | `all` | not written | Which open questions your own sessions show with your next message: `all`, `project` (only that session's repo) or `off`. Read by `session-hook.py`. |
+| `supersede_check` | on | not written | A small-model check that closes older questions a newer one on the same repo makes unnecessary. Needs `agy`. |
 | `cards` | on | not written | Discord Components V2 cards instead of plain messages. |
 | `receipt` | off | not written | A cost line under each orchestrator answer. |
 | `burn_alert` | 20 | not written | Dollars one request may cost since your last message before one `#alerts` notice. `0` = off. |
@@ -250,8 +252,10 @@ Exit codes: 0 ok, 1 error, 2 wait timed out or bad arguments. Commands that spea
 
 `agent-mail-mcp.py [--agent NAME]`: an MCP server over stdio (JSON-RPC 2.0, protocol 2024-11-05). Without `--agent` it
 uses `AGENT_MAIL_AGENT`. Tools: `list_agents`, `send_message`, `list_active_work`, `report_conflict`, `list_devices`,
-`ask_owner` (at most 5 options), `update_owner`, `answer_for_owner`, `check_inbox`, `read_message`, `ack_message`,
-`reply_message`, `wait_for_reply` (at most 45 seconds per call).
+`ask_owner` (at most 5 options; `replaces` names the open questions it makes unnecessary), `list_questions`,
+`answer_question` (from an interactive session only, with the owner's quoted words), `settle_question`, `update_owner`,
+`answer_for_owner`, `check_inbox`, `read_message`, `ack_message`, `reply_message`, `wait_for_reply` (at most 45 seconds
+per call).
 
 ### `switchboard/mail-runner.py`
 
@@ -300,7 +304,7 @@ you can instead run the orchestrator in its own process: `mail-runner.py --mcp -
 | `playbook.py` | `add PROJECT "sentence"`; `show PROJECT`; `vote PROJECT good\|bad`. |
 | `retro.py` | `[--send]`. |
 | `topics.py` | `show [--json]`; `label [--force]`. |
-| `session-hook.py` | Hook mode (JSON on stdin); `--codex '<json>'`; `--list`. |
+| `session-hook.py` | Hook mode (JSON on stdin); `--codex-hook` (a Codex hook, JSON on stdin); `--codex '<json>'`; `--list`. |
 | `permission-hook.py` | Hook mode only. |
 | `install-session-hooks.py` | `[--dry-run] [--remove] [--python P] [--no-codex]`. |
 | `codex-notify.py` | `--install` wraps the Codex `notify` program already set. |
