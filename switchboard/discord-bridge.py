@@ -533,6 +533,8 @@ class Bridge:
                                                          f"{Path(sys.executable).name} {Path(__file__).resolve()} setup --guild <your server id>\ndocs/discord-setup.md explains where the id comes from.")
         self.st = self.load_state(); self.state_saved = fleet.saved_at(fleet.host_path(dpath("state.json"), hostname()))  # named in each lease renewal, see peer_synced
         self.ch, self.owner = self.cfg["channels"], self.cfg["owner_id"]
+        self.dm = self.cfg.get("dm", True) is not False  # config "dm": false keeps the server channels and threads
+        if self.dm: self.ch = self.dm_channels()
         self.dirty, self.last_sweep, self.last_tick, self.last_q, self.saved = set(), 0.0, 0.0, 0.0, ""
         self.sysq = []  # automatic notices waiting to be deleted
         self.open_cache = None  # mail threads with undelivered agent mail, rebuilt each tick
@@ -546,6 +548,27 @@ class Bridge:
         self.last_ov, self.last_label, self.label_proc = 0.0, 0.0, None
         self.last_clean, self.budget = time.time(), 0  # the first cleaning pass comes 10 minutes after a start
 
+    def dm_channels(self):
+        """DM mode: the bot talks to Remy in one DM channel. No threads, no boards: each piece of work is its status card,
+        edited in place under his message, plus its answers and questions; one pinned board shows everything in flight."""
+        cid = api("POST", "/users/@me/channels", {"recipient_id": self.owner})["id"]
+        self.st.setdefault("dm_since", time.time())  # work from before the switch keeps its server thread until it moves again
+        return {"orchestrator": cid, "alerts": cid}
+    def legacy(self, t):
+        """Server-thread work from before DM mode that has not moved since: left where it is, not reposted in the DM."""
+        since = self.st.get("dm_since", 0)
+        return self.dm and bool(t.get("dthread")) and max(t.get("t0", 0), t.get("active_at", 0)) < since
+    def guild_part(self, cid): return "@me" if self.dm and cid == self.ch.get("orchestrator") else self.cfg.get("guild_id")
+    def dm_commands(self):
+        """DM mode: the slash commands as global commands usable in the bot's DM only, and none left in the server."""
+        if not self.dm or not self.cfg.get("bot_id"): return
+        sig = json.dumps(COMMANDS, sort_keys=True)
+        if self.st.get("dm_cmds") == sig: return
+        try:
+            api("PUT", f"/applications/{self.cfg['bot_id']}/commands", [{**c, "contexts": [1], "integration_types": [0]} for c in COMMANDS])
+            if self.cfg.get("guild_id"): api("PUT", f"/applications/{self.cfg['bot_id']}/guilds/{self.cfg['guild_id']}/commands", [])
+            self.st["dm_cmds"] = sig; log("slash commands moved to the DM")
+        except Exception as e: log("DM slash commands not registered", str(e)[:160])
     def save_state(self): self.state_saved = fleet.save_host(dpath("state.json"), self.st, hostname())  # this device's own copy only
     def load_state(self):
         """Older state files had no thread fields; everything they hold stays valid, so upgrading only adds keys."""
@@ -822,6 +845,7 @@ class Bridge:
     def ensure_thread(self, tid, t):
         """The Discord thread for this work, created on the owner's message or on a one-line card in the channel. None if
         it cannot be had right now; callers then post in the channel, so nothing is lost for lack of a permission."""
+        if self.dm: return None  # a DM has no threads: everything goes in the DM, as replies to Remy's message
         if t.get("dthread"): return t["dthread"]
         if time.time() < t.get("thread_retry", 0): return None
         parent, name = self.ch["orchestrator"], self.thread_name(t)
@@ -1358,6 +1382,7 @@ class Bridge:
     def render(self, tid):
         t = self.st["threads"][tid]
         if self.quiet(t): t["shown"] = self.state_word(t); return  # machine work: no thread, status card or #progress card
+        if self.legacy(t): t["shown"] = self.state_word(t); return
         if (t.get("origin") or t.get("mailed")) and not t.get("gone"):
             try: self.render_status(tid, t)
             except DiscordError as e:
@@ -1476,10 +1501,16 @@ class Bridge:
         notes = self.st.get("notices") or {}
         for k in [k for k, x in notes.items() if now - float(x.get("at") or 0) > NOTICE_KEEP]: del notes[k]
         if notes and texts: texts[0] += "\n-# ⚠️ " + clip("; ".join(x["text"] for x in notes.values()), 400)  # device notices, latest of each
+        if self.dm:
+            d = self.st.setdefault("dm_board", {"ids": [], "text": []})
+            if self.post_cards("orchestrator", d, ["\n\n".join(texts)]):
+                try: api("PUT", f"/channels/{self.ch['orchestrator']}/pins/{d['ids'][0]}")
+                except Exception as e: log("board not pinned", str(e)[:120])
+            return
         if self.post_cards("progress", b, texts):
             for t in self.st["threads"].values(): t.pop("prog", None)  # old per-work cards are no longer tracked, so the sweep removes them
     def render_progress(self, tid, t):
-        if self.cfg.get("progress_boards"): return
+        if self.cfg.get("progress_boards") or "progress" not in self.ch: return
         if not t["runs"] and not t.get("waiting"): return
         word = self.state_word(t); steps = self.steps(t); hosts = sorted({r["label"] for r in t["runs"].values()})
         text = f"{STATES[word][0]} **{word}**  {clean_title(t.get('title') or tid)}" + (f"  ·  {', '.join(hosts)}" if hosts else "") + (f"  ·  <#{t['dthread']}>" if t.get("dthread") else "")
@@ -1815,7 +1846,7 @@ class Bridge:
     def q_link(self, q):
         """A link to the question's card in Discord, for a session that shows it (an archived thread's <#id> would not open)."""
         cid, mid = q.get("channel"), q.get("msg")
-        return f"https://discord.com/channels/{self.cfg.get('guild_id')}/{cid}/{mid}" if cid and mid and self.cfg.get("guild_id") else ""
+        return f"https://discord.com/channels/{self.guild_part(cid)}/{cid}/{mid}" if cid and mid and self.guild_part(cid) else ""
     def publish_asks(self, now=None):
         """Write Queue/asks/<host>.json: every open question with its options, and the ones closed in the last two days with
         how. session-hook.py shows them in the owner's interactive sessions and agent-mail-mcp.py's list_questions reads them,
@@ -2473,7 +2504,7 @@ class Bridge:
                 ms = [m for m in ms if str(m["author"]["id"]) == str(self.cfg.get("bot_id")) and self.md_of(m).startswith("✦")]  # bot posts are cards: their text is in state, not content
                 if ms: self.st["argon_welcome"] = min(ms, key=lambda m: int(m["id"]))["id"]
             except Exception as e: log("argon welcome backfill failed", str(e)[:120])
-        if self.st.get("argon_thread") or now < getattr(self, "argon_try", 0) or self.cfg.get("argon_chat") is False: return
+        if self.st.get("argon_thread") or now < getattr(self, "argon_try", 0) or self.cfg.get("argon_chat") is False or self.dm: return
         self.argon_try = now + 3600
         try:
             th = api("POST", f"/channels/{self.ch['orchestrator']}/threads", {"name": "✦ Talk to the assistant", "type": 11, "auto_archive_duration": 10080})["id"]
@@ -2883,7 +2914,9 @@ class Bridge:
     def by_message(self, mid):
         """The work a message in the channel belongs to, so a Discord reply to an old card continues it."""
         for tid, t in self.st["threads"].items():
-            if mid in (t.get("origin"), t.get("card"), t.get("anchor")): return tid
+            if mid in (t.get("origin"), t.get("card"), t.get("anchor"), t.get("status"), (t.get("answer_msg") or [0, 0])[1]): return tid
+        p = next((p for p in self.st.get("posted", {}).values() if mid in (p.get("msgs") or []) or mid == p.get("tail")), None)
+        if p and p.get("thread") in self.st["threads"]: return p["thread"]
         key = self.q_by_message(mid)
         return self.st["q"][key].get("thread") if key else None
     def react(self, cid, mid, emoji=SEEN_EMOJI, method="PUT"):
@@ -3267,7 +3300,7 @@ class Bridge:
     def ov_thread(self, cid):
         ov = self.st.get("overview") or {}
         return bool(cid) and (any(c.get("thread") == cid for c in (ov.get("cards") or {}).values()) or cid in (ov.get("orphans") or []))
-    def board_of(self, cid): return next((k for k in BOARDS if self.ch.get(k) == cid), None)
+    def board_of(self, cid): return None if cid == self.ch.get("orchestrator") else next((k for k in BOARDS if self.ch.get(k) == cid), None)
     def loop_request(self, text, device=None, extra="", cid=None):
         """The owner asked, in #loops or with /loop add, to loop something or change a loop: the orchestrator sets it up with
         improve-loop.py. Returns (mail id, Discord thread id or None). Raises only if no mail was written."""
@@ -3302,7 +3335,7 @@ class Bridge:
                 if live:
                     run = next((r for r in reversed(self.cur_runs(threads[live])) if not r.get("end")), None)
                     where = f"running on {run['label']}" if run and run.get("label") else "running"
-                url = lambda cid: f"https://discord.com/channels/{self.cfg.get('guild_id')}/{cid}"  # a masked link: an archived thread's <#id> shows as "#unknown"
+                url = lambda cid: f"https://discord.com/channels/{self.guild_part(cid)}/{cid}"  # a masked link: an archived thread's <#id> shows as "#unknown"
                 if asking: icon, when = "🔴", f"needs your answer [here]({url(threads[asking].get('dthread') or self.ch['orchestrator'])})"
                 elif live: icon, when = "🟡", "cycle running now"
                 elif queued: icon, when = "⚪", ("cycle queued for its next step" if threads[queued].get("runs") else "cycle queued, waiting to start")
@@ -4057,7 +4090,7 @@ class Bridge:
         sw = self.st.setdefault("sweep", {}); cur = sw.setdefault("cursor", {}); tracked = self.tracked()
         for key in BOARDS:
             cid = self.ch.get(key)
-            if not cid or self.budget <= 0: continue
+            if not cid or self.budget <= 0 or cid == self.ch.get("orchestrator"): continue
             rows = api("GET", f"/channels/{cid}/messages?limit=100" + (f"&before={cur[key]}" if cur.get(key) else "")) or []
             done = True
             for m in rows:
@@ -4159,7 +4192,7 @@ class Bridge:
             d = queue_root() / kind
             for p in sorted(d.glob("*.report.md")) if d.is_dir() else []:
                 if p.name in self.st["reports"] or p.stat().st_mtime < self.st.get("started", now): continue
-                try: self.post_report(p)
+                try: self.post_report(p) if "reports" in self.ch else None  # DM mode has no reports channel
                 except Exception as x: log("ERR report", p.name, x); continue
                 self.st["reports"] = (self.st["reports"] + [p.name])[-300:]
         self.retry_unsent(now)
@@ -4172,7 +4205,7 @@ class Bridge:
         if self.lock_check != set():
             try: self.unlock_names()
             except Exception as x: log("ERR name locks", str(x)[:160])
-        if self.cfg.get("progress_boards"):
+        if self.cfg.get("progress_boards") or self.dm:
             try: self.render_boards(now)
             except RateLimited: pass
             except Exception as x: log("ERR boards", str(x)[:160])
@@ -4474,9 +4507,9 @@ class Bridge:
             try:
                 ws = WS(api("GET", "/gateway/bot")["url"] + "/?v=10&encoding=json")
                 hello = json.loads(ws.recv(30)); interval = hello["d"]["heartbeat_interval"] / 1000; seq = None; hb = time.time() + interval * 0.5
-                ws.send(json.dumps({"op": 2, "d": {"token": TOKEN.read_text(encoding="utf-8").strip(), "intents": 1 | 512 | 2048 | 32768,
+                ws.send(json.dumps({"op": 2, "d": {"token": TOKEN.read_text(encoding="utf-8").strip(), "intents": 1 | 512 | 2048 | 4096 | 16384 | 32768,
                                                     "properties": {"os": sys.platform, "browser": "bridge", "device": "bridge"}}}))
-                log("gateway connected on", hostname())
+                log("gateway connected on", hostname()); self.dm_commands()
                 try: self.catch_up()
                 except Exception as x: log("ERR catch up", str(x)[:160])
                 if not self.is_active():  # uncached: the network may have come back between the check above and this connect
