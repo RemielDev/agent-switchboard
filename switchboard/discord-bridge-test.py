@@ -16,6 +16,7 @@ OWNER, BOT, GUILD, PARENT, PROGRESS, THREADS, REPORTS, ALERTS = "100", "200", "3
 LOOPS = "1006"  # like OVERVIEW: in the fake server, added to the bridge with loops_on()
 OVERVIEW = "1005"  # exists in the fake server; a test adds it to the bridge's channels with ov_on()
 PC, MAC = "TEST-PC", "TEST-MAC"
+DM = "1009"  # the bot's DM channel with Remy, used with dm_on()
 
 def load_module(name, filename):
     spec = importlib.util.spec_from_file_location(name, HERE / filename)
@@ -36,6 +37,7 @@ class Fake:
     def __init__(self):
         self.next, self.channels, self.calls, self.reactions, self.responses, self.members, self.renames = 5000, {}, [], [], [], [], {}
         for c in (PARENT, PROGRESS, THREADS, REPORTS, ALERTS, OVERVIEW, LOOPS): self.channels[c] = {"type": 0, "msgs": {}}
+        self.channels[DM] = {"type": 1, "msgs": {}}; self.pins = []
         self.deny_threads, self.down, self.queue429, self.react_log, self.deny_manage = False, False, [], [], False
         self.fail = None  # fn(method, path, body) -> an Err or URLError to raise for that call, or None
     def nid(self): self.next += 1; return str(self.next)
@@ -128,6 +130,9 @@ class Fake:
             cid = self.nid(); self.channels[cid] = {"type": b["type"], "msgs": {}, "name": b["name"], "parent": b.get("parent_id"), "topic": b.get("topic")}
             return {"id": cid, "name": b["name"]}
         if p == "/users/@me": return {"id": BOT}
+        if m == "POST" and p == "/users/@me/channels": assert b == {"recipient_id": OWNER}, b; return {"id": DM, "type": 1}
+        if m == "PUT" and (r := re.fullmatch(r"/channels/(\d+)/pins/(\d+)", p)): self.pins.append((r[1], r[2])); return None
+        if re.fullmatch(r"/applications/\d+/commands", p): return b
         if p == "/gateway/bot": return {"url": "wss://gateway.test"}  # the socket itself is FakeWS in the one test that runs the loop
         if re.fullmatch(r"/applications/\d+/guilds/\d+/commands", p): return b
         if (r := re.fullmatch(r"/channels/(\d+)", p)):
@@ -175,7 +180,7 @@ def setup():
     for n, k, auto in (("owner", "human", False), ("sessions", "human", False), ("orchestrator", "claude", True), ("builder", "claude", True), ("mac", "claude", False)):
         agent_mod.register(n, MAC if n == "mac" else "any", k, auto=auto)
     q = tmp / "Queue"; (q / "discord").mkdir(parents=True, exist_ok=True)
-    (q / "discord/config.json").write_text(json.dumps({"guild_id": GUILD, "owner_id": OWNER, "bot_id": BOT, "cards": False, "smart_buttons": False, "argon_chat": False, "self_reload": False, "overview_threads": True, "hosts": [PC, MAC],
+    (q / "discord/config.json").write_text(json.dumps({"guild_id": GUILD, "owner_id": OWNER, "bot_id": BOT, "cards": False, "smart_buttons": False, "argon_chat": False, "self_reload": False, "overview_threads": True, "hosts": [PC, MAC], "dm": False,
         "channels": {"orchestrator": PARENT, "progress": PROGRESS, "threads": THREADS, "reports": REPORTS, "alerts": ALERTS}}), encoding="utf-8")
     bridge_mod = bridge_mod or load_module("discord_bridge_test", "discord-bridge.py")
     fleet_mod = bridge_mod.fleet
@@ -226,6 +231,45 @@ def press(th_or_ch, key, i):
     b.dispatch("INTERACTION_CREATE", {"type": 3, "id": fake.nid(), "token": "tok", "channel_id": msg["channel_id"], "member": {"user": {"id": OWNER}}, "data": {"custom_id": f"a:{key}:{i}"}, "message": msg})
 
 # ---- required scenarios ----
+def dm_on():
+    """The bridge in DM mode (the default): one DM channel, no threads, no boards but one pinned summary."""
+    global b
+    raw = json.loads((tmp / "Queue/discord/config.json").read_text(encoding="utf-8")); raw.pop("dm"); raw["progress_boards"] = True
+    (tmp / "Queue/discord/config.json").write_text(json.dumps(raw), encoding="utf-8")
+    b = bridge_mod.Bridge(); b.st["started"] = 0; b.spawn = lambda fn: fn(); b.spawn_label = lambda: None
+    b.cfg.update(screenshots=False, smart_buttons=False, cards=False)
+
+def test_dm_mode():
+    dm_on()
+    assert b.ch == {"orchestrator": DM, "alerts": DM} and b.board_of(DM) is None, b.ch
+    origin = owner_msg("Fix the pool in Kabuki", cid=DM); tick(); mid = inbox("orchestrator")[-1]["id"]
+    assert not fake.threads() and inbox("orchestrator")[-1]["subject"] == "Fix the pool in Kabuki", "a request, no thread"
+    st = status_msgs(DM); assert len(st) == 1 and "Queued" in st[0]["content"] and (st[0]["message_reference"] or {}).get("message_id") == origin, "status card under his message"
+    board = [m for m in fake.msgs(DM) if m["author"]["id"] == BOT and m["id"] != st[0]["id"]]
+    assert len(board) == 1 and fake.pins == [(DM, board[0]["id"])], "one pinned board"
+    for c in (PARENT, PROGRESS, THREADS, REPORTS, ALERTS): assert not fake.msgs(c), c
+    n = len(fake.msgs(DM)); event("started", mid, agent="orchestrator"); tick()
+    assert len(fake.msgs(DM)) == n and "Working" in status_msgs(DM)[0]["content"] and status_msgs(DM)[0]["id"] == st[0]["id"], "status edited in place, board edited in place"
+    q = question(mid); tick()
+    card = next(m for m in fake.msgs(DM) if m["components"] and any(x.get("custom_id", "").startswith(f"a:{q['id']}:") for x in bridge_mod.walk_components(m["components"])))
+    b.dispatch("INTERACTION_CREATE", {"type": 3, "id": fake.nid(), "token": "tok", "channel_id": DM, "user": {"id": OWNER}, "data": {"custom_id": f"a:{q['id']}:1"}, "message": card})
+    assert next(m for m in inbox("orchestrator") if m.get("reply_to") == q["id"])["body"] == "B", "a DM button answers"
+    assert b.q_link({"channel": DM, "msg": card["id"]}) == f"https://discord.com/channels/@me/{DM}/{card['id']}"
+    for m in inbox("orchestrator"): agent_mod.ack("orchestrator", m["id"])
+    event("done", mid, agent="orchestrator"); answer(mid, "Fixed the pool."); tick(3)
+    said = [m for m in fake.msgs(DM) if "Fixed the pool." in m["content"]]; assert len(said) == 1, said
+    owner_msg("Make it deeper too", cid=DM, reference={"message_id": said[0]["id"]}); tick()
+    assert inbox("orchestrator")[-1]["thread"] == mid and inbox("orchestrator")[-1]["body"] == "Make it deeper too", "a reply to the answer continues the work"
+    assert not fake.threads(), "never a thread"
+    b.budget = 20; b.sweep_untracked(CLOCK.time() + 7200); assert said[0]["id"] in fake.channels[DM]["msgs"], "the sweep never deletes in the DM"
+
+def test_dm_old_threads_stay():
+    """Work from before the switch, in a server thread, is not reposted in the DM until it moves again."""
+    origin, mid = request(); event("started", mid); event("done", mid); answer(mid, "Done in the thread."); tick(3)
+    CLOCK.offset += 10; dm_on(); b.st["dm_since"] = CLOCK.time(); b.dirty.add(mid); sweep_tick()
+    assert not status_msgs(DM), "an old thread's status stays in the server"
+    answer(mid, "One more thing."); tick(3)
+    assert any("One more thing." in m["content"] for m in fake.msgs(DM)), "new content for it comes to the DM"
 def test_new_request():
     origin, mid = request()
     assert origin in fake.threads(), "thread is on the owner's own message"

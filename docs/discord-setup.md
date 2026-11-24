@@ -1,7 +1,7 @@
 # Connecting Discord
 
-Discord is the front end: you type a request in a channel, it becomes a thread, and the agents answer there with
-status, questions as buttons, and files. The bridge is one small process (`switchboard/discord-bridge.py`) that
+Discord is the front end: you message the bot in a direct message (DM) and the agents answer there with status,
+questions as buttons, and files. Each status card and answer is edited in place, so the DM stays short. The bridge is one small process (`switchboard/discord-bridge.py`) that
 turns agent mail into Discord messages and back. Agents never see Discord; they only read and write mail.
 
 Setting it up takes about ten minutes, once.
@@ -58,6 +58,13 @@ stay where you put them.
 
 The result is written to `<root>/Queue/discord/config.json`, which is shared between your devices. The token is not.
 
+**DM mode (the default).** The bot talks to you in one DM instead of these channels. Each request gets a status card
+under your message, edited in place and removed once the answer is posted. Questions arrive as buttons in the DM, alerts
+go there too, and one pinned board message lists what is working and what needs you. Reply to any of the bot's messages
+to continue that piece of work. Slash commands are registered for the DM only. The server is still needed: the bot
+must share it with you to open the DM, and the bridge lock lives there. Threads opened before the switch stay where
+they are. Set `"dm": false` in the config to use the channels and threads below instead.
+
 ## 4. Run it
 
 ```
@@ -69,7 +76,7 @@ Type a request in `#orchestrator`. To start both at login, see `setup/autostart.
 
 ## Using it
 
-- **A request** is any message in `#orchestrator`. It goes to the orchestrator agent. Start a message with an agent's
+- **A request** is any message you send the bot in the DM (or in `#orchestrator` with `"dm": false`). It goes to the orchestrator agent. Start a message with an agent's
   name and a colon (`builder: ...`) to address that agent directly.
 - **Inside a thread**, anything you type continues that piece of work. While a question with buttons is open, typed
   text answers it.
@@ -90,6 +97,7 @@ Type a request in `#orchestrator`. To start both at login, see `setup/autostart.
 | Key | Effect |
 |---|---|
 | `hosts` | The devices that may run the bridge, in priority order. The first one that is up serves; the rest stand by. |
+| `dm` | On unless set to false. False uses the server channels and one thread per request. |
 | `one_answer_per_turn` | One answer message per message of yours, edited in place, instead of a stream of messages. |
 | `progress_boards` | Group `#progress` into a few category messages. |
 | `notepad` | Messages you send in quick succession are read together as one note. |

@@ -86,6 +86,7 @@ on one device at a time. `templates/config/discord.config.example.json` shows a 
 | Key | Code default | Setup writes | Meaning |
 |---|---|---|---|
 | `hosts` | this host | `[setup host]` | Devices that may run the bridge, in priority order. The first is the primary. |
+| `dm` | on | not written | Talk to you in one DM: status cards under your messages edited in place, buttons, alerts and one pinned board, slash commands registered for the DM only. False: the server channels and one thread per request. The lock stays in the server either way. |
 | `lease_msg` | none | `[thread id, message id]` | The bridge lock: a plain bot message `host\|epoch` in a private thread under `#alerts` named "bridge lock". Needed for a fast two-device takeover. Leave the thread alone. |
 | `one_answer_per_turn` | off | true | One answer message per message of yours, edited in place. |
 | `notepad` | off | true | Batch your messages, keep the notepad, track edits, deletions and read marks. |
